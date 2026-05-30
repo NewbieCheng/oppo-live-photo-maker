@@ -8,6 +8,11 @@ __pycache__/
 *.egg-info/
 .eggs/
 
+# Web
+web/node_modules/
+web/dist/
+web/.vite/
+
 # Test outputs / coverage
 tests/output/
 *.live.jpg

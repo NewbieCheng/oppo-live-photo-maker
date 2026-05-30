@@ -7,6 +7,14 @@
 
 把任意视频转换成 OPPO 手机相册识别的「实况图片」（MotionPhoto）。
 
+> 🌐 **[在线版（推荐）→ Young-Spark.github.io/oppo-live-photo-maker](https://young-spark.github.io/oppo-live-photo-maker/)**
+>
+> 浏览器内完成，零安装、零上传，视频不会离开你的设备。
+> 需要支持 WebCodecs API 的现代浏览器：**Chrome / Edge 94+** 或 **Safari 16.4+** 或 **Firefox 130+**。
+> 旧浏览器或服务器端处理需求请用下方桌面版 / CLI。
+
+## 桌面版
+
 支持：
 
 - **单视频精修**：可视化预览，拖动选片段起点和封面静态帧
@@ -165,6 +173,37 @@ CI 在每次 push / PR 自动跑 ruff + pytest（Linux / macOS / Windows × Pyth
 ## 协议
 
 [MIT](LICENSE)。
+
+## 网页版（web/）
+
+`web/` 子目录是同一格式的纯前端 TypeScript + Vue3 实现，部署在 GitHub Pages 上：
+
+- `web/src/lib/muxer.ts` — 用纯 JS 写 OPPO MotionPhoto 字节结构（**不依赖 exiftool**）
+- `web/src/lib/webcodecs.ts` — 基于 [mediabunny](https://mediabunny.dev/) + WebCodecs API 的硬件加速解码 / 编码 / 封装
+- `web/src/App.vue` — 简洁单页 UI
+
+浏览器要求：**Chrome / Edge 94+** 或 **Safari 16.4+** 或 **Firefox 130+**（必须支持 WebCodecs API）。
+
+本地开发：
+
+```cmd
+cd web
+npm install
+npm run dev
+```
+
+测试：
+
+```cmd
+npm test
+```
+
+构建（GitHub Pages 部署用）会在 push 到 `web/**` 时由 `.github/workflows/pages.yml` 自动触发。
+
+## 致谢
+
+- [mediabunny](https://mediabunny.dev/) — 网页版用到的 WebCodecs 封装库（MPL-2.0）
+- 逆向参考了 Google MotionPhoto / GContainer 公开规范，对比 Find X7 Ultra 真机样本得出。
 
 ## 免责
 
