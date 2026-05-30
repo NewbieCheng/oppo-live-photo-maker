@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-31
+
+### Fixed
+
+- **Web 版竖屏视频封面拉伸** — 封面提取误用 `getCodedWidth/Height`（编码尺寸），
+  竖屏视频（带旋转元数据）被当作横屏处理导致封面比例错误。
+  改用 `getDisplayWidth/Height`，与视频转码保持一致的缩放逻辑。
+  （[#6](https://github.com/Young-Spark/oppo-live-photo-maker/issues/6)）
+
 ## [0.1.0] - 2026-05-31
 
 First public release.
@@ -54,5 +63,6 @@ First public release.
 - GitHub Actions release workflow auto-builds the Windows EXE on `v*` tags
   and marks tags containing a hyphen (e.g. `v0.2.0-rc1`) as prereleases.
 
-[Unreleased]: https://github.com/Young-Spark/oppo-live-photo-maker/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Young-Spark/oppo-live-photo-maker/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Young-Spark/oppo-live-photo-maker/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Young-Spark/oppo-live-photo-maker/releases/tag/v0.1.0

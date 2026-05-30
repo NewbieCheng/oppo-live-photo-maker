@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oppo-live-photo-maker"
-version = "0.1.0"
+version = "0.1.1"
 description = "Convert any video into an OPPO MotionPhoto (Live Photo) JPEG."
 readme = "README.md"
 requires-python = ">=3.9"

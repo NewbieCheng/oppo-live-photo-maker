@@ -120,11 +120,12 @@ export async function extractCoverWebCodecs(
       throw new WebCodecsUnsupported(`Cannot decode codec ${codec ?? "unknown"}`);
     }
 
-    const srcW = await track.getCodedWidth();
-    const srcH = await track.getCodedHeight();
-    const ratio = options.longEdge / Math.max(srcW, srcH);
-    const outW = Math.max(2, Math.round((srcW * ratio) / 2) * 2);
-    const outH = Math.max(2, Math.round((srcH * ratio) / 2) * 2);
+    const srcW = await track.getDisplayWidth();
+    const srcH = await track.getDisplayHeight();
+    const longEdge = options.longEdge;
+    const isLandscape = srcW >= srcH;
+    const outW = isLandscape ? longEdge : Math.max(2, Math.round(((srcW * longEdge) / srcH) / 2) * 2);
+    const outH = isLandscape ? Math.max(2, Math.round(((srcH * longEdge) / srcW) / 2) * 2) : longEdge;
 
     const sink = new CanvasSink(track, { width: outW, height: outH, fit: "fill" });
     // mp4 edit lists often shift the first PTS off zero. Clamp the request to
