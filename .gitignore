@@ -1,0 +1,15 @@
+# Build artifacts
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+
+# Test outputs
+tests/output/
+*.live.jpg
+test_out.jpg
+
+# IDE
+.vscode/
+.idea/
