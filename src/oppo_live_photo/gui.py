@@ -1,17 +1,29 @@
 """GUI for OPPO Live Photo Maker (PySide6) - 中文界面."""
+# SPDX-License-Identifier: MIT
 from __future__ import annotations
 
 import sys
 import tempfile
 import traceback
 from pathlib import Path
+from typing import TypedDict
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
 from . import ffmpeg_utils, muxer
+
+
+class ConvertParams(TypedDict, total=False):
+    start: float
+    duration: float
+    cover_time: float
+    long_edge: int
+    crf: int
+    audio_kbps: int
+    preset: str
 
 
 # ---------- Worker thread ---------------------------------------------------
@@ -22,26 +34,42 @@ class ConvertWorker(QtCore.QObject):
     finished = Signal(Path)
     failed = Signal(str)
 
-    def __init__(self, video: Path, output: Path, params: dict):
+    def __init__(self, video: Path, output: Path, params: ConvertParams):
         super().__init__()
         self.video = video
         self.output = output
         self.params = params
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
 
     @QtCore.Slot()
-    def run(self):
+    def run(self) -> None:
         try:
-            with tempfile.TemporaryDirectory() as td:
+            with tempfile.TemporaryDirectory(prefix="oppo-live-") as td:
                 td_path = Path(td)
                 cover = td_path / "cover.jpg"
                 clip = td_path / "clip.mp4"
                 p = self.params
+
+                try:
+                    info = ffmpeg_utils.probe(self.video)
+                except Exception:
+                    info = None
+
+                if self._cancel:
+                    raise RuntimeError("已取消")
+
                 self.progress.emit("正在抽取封面帧...")
                 ffmpeg_utils.extract_cover(
                     self.video, cover,
                     timestamp=p["cover_time"],
                     target_long_edge=p["long_edge"],
                 )
+                if self._cancel:
+                    raise RuntimeError("已取消")
+
                 self.progress.emit("正在编码视频片段...")
                 ffmpeg_utils.transcode_clip(
                     self.video, clip,
@@ -49,14 +77,58 @@ class ConvertWorker(QtCore.QObject):
                     duration=p["duration"],
                     target_long_edge=p["long_edge"],
                     crf=p["crf"],
-                    audio_bitrate_k=p["audio_kbps"],
+                    audio_bitrate_k=p.get("audio_kbps", 128),
+                    preset=p.get("preset", "fast"),
+                    has_audio=(info.has_audio if info else None),
                 )
+                if self._cancel:
+                    raise RuntimeError("已取消")
+
                 self.progress.emit("正在合成 OPPO 实况图...")
                 muxer.write_oppo_motionphoto(cover, clip, self.output)
             self.finished.emit(self.output)
         except Exception as e:
             tb = traceback.format_exc()
             self.failed.emit(f"{e}\n\n{tb}")
+
+
+# ---------- Drag-and-drop video list ---------------------------------------
+
+class VideoListWidget(QtWidgets.QListWidget):
+    """QListWidget that accepts video file drops via the standard event API."""
+
+    files_dropped = Signal(list)
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.setDragDropMode(QtWidgets.QAbstractItemView.DropOnly)
+
+    def dragEnterEvent(self, e: QtGui.QDragEnterEvent) -> None:  # noqa: N802
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e: QtGui.QDragMoveEvent) -> None:  # noqa: N802
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
+
+    def dropEvent(self, e: QtGui.QDropEvent) -> None:  # noqa: N802
+        if not e.mimeData().hasUrls():
+            super().dropEvent(e)
+            return
+        files: list[Path] = []
+        for url in e.mimeData().urls():
+            p = Path(url.toLocalFile())
+            if p.is_file():
+                files.append(p)
+        if files:
+            self.files_dropped.emit(files)
+            e.acceptProposedAction()
 
 
 # ---------- Single convert tab ---------------------------------------------
@@ -283,7 +355,7 @@ class SingleTab(QtWidgets.QWidget):
             return
         out = Path(self.out_edit.text()) if self.out_edit.text().strip() \
             else self.video_path.with_suffix(".live.jpg")
-        params = {
+        params: ConvertParams = {
             "start": self.spin_start.value(),
             "duration": self.spin_duration.value(),
             "cover_time": self.spin_cover.value(),
@@ -293,7 +365,7 @@ class SingleTab(QtWidgets.QWidget):
         }
         self._run_worker(self.video_path, out, params)
 
-    def _run_worker(self, video: Path, output: Path, params: dict):
+    def _run_worker(self, video: Path, output: Path, params: ConvertParams):
         self.btn_convert.setEnabled(False)
         self.status.setText("处理中...")
         self.thread = QtCore.QThread(self)
@@ -327,9 +399,12 @@ class SingleTab(QtWidgets.QWidget):
 class BatchTab(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
-        self.threads: list[QtCore.QThread] = []
         self.queue: list[Path] = []
         self.current_index = 0
+        self.thread: QtCore.QThread | None = None
+        self.worker: ConvertWorker | None = None
+        self.failures: list[tuple[Path, str]] = []
+        self._stop_requested = False
         self._build_ui()
 
     def _build_ui(self):
@@ -340,13 +415,8 @@ class BatchTab(QtWidgets.QWidget):
             "每个文件都会按下方参数转换。"
         ))
 
-        self.list = QtWidgets.QListWidget()
-        self.list.setAcceptDrops(True)
-        self.list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.list.setDragDropMode(QtWidgets.QAbstractItemView.DropOnly)
-        self.list.dragEnterEvent = self._drag_enter
-        self.list.dragMoveEvent = self._drag_enter
-        self.list.dropEvent = self._drop
+        self.list = VideoListWidget()
+        self.list.files_dropped.connect(self._on_files_dropped)
         v.addWidget(self.list, 1)
 
         btn_row = QtWidgets.QHBoxLayout()
@@ -362,16 +432,22 @@ class BatchTab(QtWidgets.QWidget):
         params = QtWidgets.QGroupBox("默认参数")
         f = QtWidgets.QFormLayout(params)
         self.spin_start = QtWidgets.QDoubleSpinBox()
-        self.spin_start.setRange(0, 99999); self.spin_start.setSuffix(" 秒")
+        self.spin_start.setRange(0, 99999)
+        self.spin_start.setSuffix(" 秒")
         f.addRow("片段起点：", self.spin_start)
         self.spin_duration = QtWidgets.QDoubleSpinBox()
-        self.spin_duration.setRange(0.5, 10); self.spin_duration.setValue(3); self.spin_duration.setSuffix(" 秒")
+        self.spin_duration.setRange(0.5, 10)
+        self.spin_duration.setValue(3)
+        self.spin_duration.setSuffix(" 秒")
         f.addRow("片段时长：", self.spin_duration)
         self.spin_long = QtWidgets.QSpinBox()
-        self.spin_long.setRange(360, 4096); self.spin_long.setValue(1920); self.spin_long.setSuffix(" 像素")
+        self.spin_long.setRange(360, 4096)
+        self.spin_long.setValue(1920)
+        self.spin_long.setSuffix(" 像素")
         f.addRow("输出长边：", self.spin_long)
         self.spin_crf = QtWidgets.QSpinBox()
-        self.spin_crf.setRange(14, 32); self.spin_crf.setValue(23)
+        self.spin_crf.setRange(14, 32)
+        self.spin_crf.setValue(23)
         f.addRow("视频 CRF：", self.spin_crf)
         v.addWidget(params)
 
@@ -386,23 +462,30 @@ class BatchTab(QtWidgets.QWidget):
         out_row.addWidget(btn_browse)
         v.addLayout(out_row)
 
+        # Progress bar
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setValue(0)
+        self.progress.setVisible(False)
+        v.addWidget(self.progress)
+
+        run_row = QtWidgets.QHBoxLayout()
         self.btn_run = QtWidgets.QPushButton("开始批量转换")
         self.btn_run.setStyleSheet("padding: 10px; font-weight: bold;")
         self.btn_run.clicked.connect(self._run_batch)
-        v.addWidget(self.btn_run)
+        self.btn_stop = QtWidgets.QPushButton("停止")
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.clicked.connect(self._request_stop)
+        run_row.addWidget(self.btn_run, 1)
+        run_row.addWidget(self.btn_stop)
+        v.addLayout(run_row)
 
         self.status = QtWidgets.QLabel("就绪")
         v.addWidget(self.status)
 
-    def _drag_enter(self, e: QtGui.QDragEnterEvent):
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
-
-    def _drop(self, e: QtGui.QDropEvent):
-        for url in e.mimeData().urls():
-            p = Path(url.toLocalFile())
-            if p.is_file():
-                self._add_path(p)
+    def _on_files_dropped(self, files: list[Path]):
+        for p in files:
+            self._add_path(p)
 
     def _add_videos(self):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -429,19 +512,32 @@ class BatchTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, "列表为空", "请先添加至少一个视频。")
             return
         self.current_index = 0
+        self.failures = []
+        self._stop_requested = False
         self.btn_run.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.progress.setRange(0, len(self.queue))
+        self.progress.setValue(0)
+        self.progress.setVisible(True)
         self._next()
 
+    def _request_stop(self):
+        self._stop_requested = True
+        if self.worker:
+            self.worker.cancel()
+        self.status.setText("等待当前任务结束...")
+        self.btn_stop.setEnabled(False)
+
     def _next(self):
-        if self.current_index >= len(self.queue):
-            self.status.setText(f"全部完成，共 {len(self.queue)} 个文件。")
-            self.btn_run.setEnabled(True)
-            QtWidgets.QMessageBox.information(self, "完成", "批量转换已完成。")
+        if self._stop_requested or self.current_index >= len(self.queue):
+            self._on_batch_done()
             return
         video = self.queue[self.current_index]
-        out_dir = Path(self.out_edit.text()) if self.out_edit.text().strip() else video.parent
+        out_dir = (
+            Path(self.out_edit.text()) if self.out_edit.text().strip() else video.parent
+        )
         out = out_dir / (video.stem + ".live.jpg")
-        params = {
+        params: ConvertParams = {
             "start": self.spin_start.value(),
             "duration": self.spin_duration.value(),
             "cover_time": self.spin_start.value(),
@@ -452,30 +548,56 @@ class BatchTab(QtWidgets.QWidget):
         self.status.setText(
             f"[{self.current_index+1}/{len(self.queue)}] {video.name} ..."
         )
-        thread = QtCore.QThread(self)
-        worker = ConvertWorker(video, out, params)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(lambda _o: self._step_done())
-        worker.failed.connect(lambda msg: self._step_failed(msg))
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(thread.deleteLater)
-        self.threads.append(thread)
-        self._cur_worker = worker
-        thread.start()
+        self.thread = QtCore.QThread(self)
+        self.worker = ConvertWorker(video, out, params)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self._step_done)
+        self.worker.failed.connect(self._step_failed)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.failed.connect(self.thread.quit)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.start()
 
-    def _step_done(self):
+    def _step_done(self, _out: Path):
         self.current_index += 1
+        self.progress.setValue(self.current_index)
         self._next()
 
     def _step_failed(self, msg: str):
-        QtWidgets.QMessageBox.warning(
-            self, "其中一个文件失败",
-            f"{self.queue[self.current_index].name}\n\n{msg}"
-        )
+        self.failures.append((self.queue[self.current_index], msg))
         self.current_index += 1
+        self.progress.setValue(self.current_index)
         self._next()
+
+    def _on_batch_done(self):
+        self.btn_run.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        total = len(self.queue)
+        ok = self.current_index - len(self.failures)
+        if self._stop_requested:
+            self.status.setText(
+                f"已停止：完成 {ok}/{total}，失败 {len(self.failures)}"
+            )
+        else:
+            self.status.setText(
+                f"完成 {ok}/{total}，失败 {len(self.failures)}"
+            )
+        self._show_summary()
+
+    def _show_summary(self):
+        if not self.failures:
+            QtWidgets.QMessageBox.information(
+                self, "完成", f"批量转换完成，共 {self.current_index} 个文件。"
+            )
+            return
+        lines = [f"共 {len(self.failures)} 个文件失败："]
+        for path, msg in self.failures[:20]:
+            first = msg.splitlines()[0] if msg else ""
+            lines.append(f"\n• {path.name}\n  {first}")
+        if len(self.failures) > 20:
+            lines.append(f"\n... 还有 {len(self.failures) - 20} 个未列出")
+        QtWidgets.QMessageBox.warning(self, "部分失败", "\n".join(lines))
 
 
 # ---------- Main window ----------------------------------------------------

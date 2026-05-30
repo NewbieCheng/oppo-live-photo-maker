@@ -1,11 +1,17 @@
 """ffmpeg / ffprobe wrappers for cover-frame extraction and clip transcoding."""
+# SPDX-License-Identifier: MIT
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+# Hide subprocess console windows on Windows when launched from a GUI bundle.
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 def _find(tool: str) -> str:
@@ -15,6 +21,26 @@ def _find(tool: str) -> str:
             f"{tool} not found. Install ffmpeg (includes ffprobe) and add to PATH."
         )
     return exe
+
+
+def _run(cmd: list[str], *, text: bool = False) -> subprocess.CompletedProcess:
+    """Run a subprocess, surfacing stderr in any raised error."""
+    try:
+        return subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=text,
+            encoding="utf-8" if text else None,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except subprocess.CalledProcessError as e:
+        err = e.stderr if text else (e.stderr or b"").decode("utf-8", "replace")
+        out = e.stdout if text else (e.stdout or b"").decode("utf-8", "replace")
+        detail = (err or out or "").strip() or "(no output)"
+        raise RuntimeError(
+            f"{Path(cmd[0]).name} failed (exit {e.returncode}):\n{detail}"
+        ) from e
 
 
 @dataclass
@@ -37,13 +63,13 @@ class VideoInfo:
 def probe(video: str | Path) -> VideoInfo:
     """Return basic info about a video file."""
     ffprobe = _find("ffprobe")
-    out = subprocess.run(
+    out = _run(
         [
             ffprobe, "-v", "error", "-print_format", "json",
             "-show_format", "-show_streams",
             str(video),
         ],
-        check=True, capture_output=True, text=True, encoding="utf-8",
+        text=True,
     ).stdout
     data = json.loads(out)
     streams = data.get("streams", [])
@@ -52,25 +78,26 @@ def probe(video: str | Path) -> VideoInfo:
     if not vstream:
         raise RuntimeError("No video stream found")
 
-    duration = float(data.get("format", {}).get("duration") or vstream.get("duration") or 0.0)
+    duration = float(
+        data.get("format", {}).get("duration") or vstream.get("duration") or 0.0
+    )
     width = int(vstream["width"])
     height = int(vstream["height"])
 
     rotation = 0
-    # Old-style tag
+    # Old-style tag (ffmpeg < 5).
     tags = vstream.get("tags") or {}
     if "rotate" in tags:
-        try:
+        with contextlib.suppress(ValueError):
             rotation = int(tags["rotate"]) % 360
-        except ValueError:
-            pass
-    # New-style side data: Display Matrix
+    # New-style side data: Display Matrix. ffprobe reports the angle the
+    # decoder must apply to "undo" the matrix, which is the negative of the
+    # capture-time rotation. Negate so we end up with the visual rotation.
     for sd in vstream.get("side_data_list", []) or []:
         if sd.get("side_data_type") == "Display Matrix":
             try:
-                # ffprobe reports rotation; sign convention is opposite for some
-                # versions. Normalize to positive degrees.
-                rotation = int(round(float(sd.get("rotation", 0)))) % 360
+                rot = float(sd.get("rotation", 0))
+                rotation = int(round(-rot)) % 360
             except (TypeError, ValueError):
                 pass
 
@@ -106,7 +133,7 @@ def extract_cover(
         f"scale='if(gt(iw,ih),{target_long_edge},-2)':'"
         f"if(gt(iw,ih),-2,{target_long_edge})'"
     )
-    subprocess.run(
+    _run(
         [
             ffmpeg, "-y",
             "-ss", f"{max(0.0, timestamp):.3f}",
@@ -115,8 +142,7 @@ def extract_cover(
             "-vf", scale,
             "-q:v", str(quality),
             str(out),
-        ],
-        check=True, capture_output=True,
+        ]
     )
     return out
 
@@ -131,12 +157,28 @@ def transcode_clip(
     crf: int = 23,
     audio_bitrate_k: int = 128,
     maxrate_k: int | None = None,
+    has_audio: bool | None = None,
+    preset: str = "fast",
 ) -> Path:
     """Transcode a [start, start+duration] segment to H.264 MP4 suitable as
-    the OPPO MotionPhoto video chunk."""
+    the OPPO MotionPhoto video chunk.
+
+    Args:
+        has_audio: If False, drop the audio track entirely. If None, probe the
+            source first.
+        preset: x264 preset; "fast" is a good speed/quality trade-off for the
+            short clips used in MotionPhoto.
+    """
     ffmpeg = _find("ffmpeg")
     out = Path(out_mp4)
     out.parent.mkdir(parents=True, exist_ok=True)
+
+    if has_audio is None:
+        try:
+            has_audio = probe(video).has_audio
+        except Exception:
+            has_audio = True  # assume yes; ffmpeg will silently drop if absent
+
     scale = (
         f"scale='if(gt(iw,ih),{target_long_edge},-2)':'"
         f"if(gt(iw,ih),-2,{target_long_edge})',format=yuv420p"
@@ -150,23 +192,23 @@ def transcode_clip(
         "-c:v", "libx264",
         "-profile:v", "high",
         "-pix_fmt", "yuv420p",
-        "-preset", "medium",
+        "-preset", preset,
         "-crf", str(crf),
-        "-c:a", "aac",
-        "-b:a", f"{audio_bitrate_k}k",
-        "-movflags", "+faststart",
     ]
+    if has_audio:
+        cmd += ["-c:a", "aac", "-b:a", f"{audio_bitrate_k}k"]
+    else:
+        cmd += ["-an"]
+    # Cut both streams to the requested duration so an overlong audio track
+    # cannot extend the clip.
+    cmd += ["-shortest"]
     if maxrate_k:
         cmd += ["-maxrate", f"{maxrate_k}k", "-bufsize", f"{maxrate_k * 2}k"]
     cmd.append(str(out))
-    subprocess.run(cmd, check=True, capture_output=True)
+    _run(cmd)
     return out
 
 
 def check_dependencies() -> list[str]:
     """Return a list of missing dependency names."""
-    missing = []
-    for tool in ("ffmpeg", "ffprobe", "exiftool"):
-        if not shutil.which(tool):
-            missing.append(tool)
-    return missing
+    return [tool for tool in ("ffmpeg", "ffprobe", "exiftool") if not shutil.which(tool)]

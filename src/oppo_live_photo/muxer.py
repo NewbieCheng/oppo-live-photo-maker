@@ -10,16 +10,20 @@ File layout produced:
 Required external tools:
     - exiftool (in PATH)
 """
+# SPDX-License-Identifier: MIT
 from __future__ import annotations
 
-import json
-import os
 import shutil
 import struct
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 EXIFTOOL_CONFIG_NAME = "exiftool_oppo.config"
+
+# Hide subprocess console windows on Windows when launched from a GUI bundle.
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 def _find_exiftool() -> str:
@@ -32,25 +36,51 @@ def _find_exiftool() -> str:
 
 
 def _config_path() -> str:
-    """Locate the exiftool config bundled next to this module.
+    """Locate the bundled exiftool config.
 
-    Supports normal source layout AND PyInstaller --onefile (sys._MEIPASS).
+    Search order:
+        1. PyInstaller bundle (sys._MEIPASS)
+        2. Package data dir (oppo_live_photo/data/)
+        3. Repository root next to ``src/`` (legacy/dev layout)
     """
-    import sys
     here = Path(__file__).resolve().parent
-    candidates = [
-        here / EXIFTOOL_CONFIG_NAME,
-        here.parent / EXIFTOOL_CONFIG_NAME,
-    ]
+    candidates: list[Path] = []
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
-        candidates.insert(0, Path(meipass) / EXIFTOOL_CONFIG_NAME)
+        candidates.append(Path(meipass) / EXIFTOOL_CONFIG_NAME)
+        candidates.append(Path(meipass) / "data" / EXIFTOOL_CONFIG_NAME)
+    candidates.extend(
+        [
+            here / "data" / EXIFTOOL_CONFIG_NAME,
+            here / EXIFTOOL_CONFIG_NAME,
+            here.parent.parent / EXIFTOOL_CONFIG_NAME,  # repo root in src-layout
+        ]
+    )
     for c in candidates:
         if c.is_file():
             return str(c)
     raise FileNotFoundError(
-        f"{EXIFTOOL_CONFIG_NAME} not found near {here}"
+        f"{EXIFTOOL_CONFIG_NAME} not found. Tried: "
+        + ", ".join(str(c) for c in candidates)
     )
+
+
+def _run(cmd: list[str]) -> None:
+    """Run a subprocess, surfacing stderr in any raised error."""
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or b"").decode("utf-8", "replace").strip()
+        stdout = (e.stdout or b"").decode("utf-8", "replace").strip()
+        detail = stderr or stdout or "(no output)"
+        raise RuntimeError(
+            f"{Path(cmd[0]).name} failed (exit {e.returncode}):\n{detail}"
+        ) from e
 
 
 def _build_mpf_segment(image_size: int) -> bytes:
@@ -86,7 +116,12 @@ def _find_app_insertion_point(jpeg: bytes) -> int:
     i = 2
     last_app_end = 2
     n = len(jpeg)
-    while i < n - 1 and jpeg[i] == 0xFF:
+    while i < n - 1:
+        # Allow fill bytes 0xFF before a marker (legal padding).
+        while i < n and jpeg[i] == 0xFF and i + 1 < n and jpeg[i + 1] == 0xFF:
+            i += 1
+        if i >= n - 1 or jpeg[i] != 0xFF:
+            return last_app_end
         marker = jpeg[i + 1]
         if marker in (0xDA, 0xD9):  # SOS / EOI
             return last_app_end
@@ -95,7 +130,15 @@ def _find_app_insertion_point(jpeg: bytes) -> int:
             return last_app_end
         if marker in (0xDB, 0xC4):  # DQT / DHT
             return last_app_end
+        # Standalone markers without a length field (TEM, RST0..RST7).
+        if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        if i + 4 > n:
+            return last_app_end
         seg_len = int.from_bytes(jpeg[i + 2 : i + 4], "big")
+        if seg_len < 2 or i + 2 + seg_len > n:
+            return last_app_end
         i += 2 + seg_len
         last_app_end = i
     return last_app_end
@@ -132,28 +175,21 @@ def write_oppo_motionphoto(
     exiftool = _find_exiftool()
     config = _config_path()
     video_size = video_mp4.stat().st_size
+    ts = int(presentation_timestamp_us)
 
-    # Work on a temp copy so the source cover.jpg stays untouched.
-    work_jpg = output_path.with_suffix(".work.jpg")
-    shutil.copyfile(cover_jpg, work_jpg)
+    # Use a private temp dir so concurrent jobs writing to the same output
+    # directory cannot clash on a sidecar JPEG.
+    with tempfile.TemporaryDirectory(prefix="oppo-live-") as td:
+        work_jpg = Path(td) / "work.jpg"
+        shutil.copyfile(cover_jpg, work_jpg)
 
-    try:
-        # 1. Strip prior XMP/MPF/Trailer to avoid duplicates
-        subprocess.run(
+        # Single exiftool invocation: strip-then-inject in one process call.
+        _run(
             [
                 exiftool, "-config", config, "-overwrite_original",
+                # 1. Strip prior XMP/MPF/Trailer to avoid duplicates.
                 "-XMP:all=", "-MPF:all=", "-Trailer:all=",
-                str(work_jpg),
-            ],
-            check=True, capture_output=True,
-        )
-
-        # 2. Inject EXIF + XMP metadata expected by OPPO Photos
-        ts = int(presentation_timestamp_us)
-        subprocess.run(
-            [
-                exiftool, "-config", config, "-overwrite_original",
-                # EXIF: OPPO private user comment marker
+                # 2. Inject EXIF + XMP metadata expected by OPPO Photos.
                 "-EXIF:UserComment=Oplus_8388608",
                 # XMP - GCamera (Google MotionPhoto core)
                 "-XMP-GCamera:MotionPhoto=1",
@@ -165,22 +201,16 @@ def write_oppo_motionphoto(
                 "-XMP-OpCamera:OLivePhotoVersion=2",
                 f"-XMP-OpCamera:VideoLength={video_size}",
                 "-XMP-OpCamera:MotionPhotoFeatureFlag=1",
-                # XMP - Container directory: Primary JPEG + MotionPhoto MP4
+                # XMP - Container directory: Primary JPEG + MotionPhoto MP4.
                 "-XMP-Container:Directory+={Item={Mime=image/jpeg,"
                 "Semantic=Primary,Length=0,Padding=0}}",
                 f"-XMP-Container:Directory+={{Item={{Mime=video/mp4,"
                 f"Semantic=MotionPhoto,Length={video_size},Padding=0}}}}",
                 str(work_jpg),
-            ],
-            check=True, capture_output=True,
+            ]
         )
 
         photo_bytes = work_jpg.read_bytes()
-    finally:
-        try:
-            work_jpg.unlink()
-        except FileNotFoundError:
-            pass
 
     # 3. Insert MPF APP2 segment (NumberOfImages=1)
     test_seg = _build_mpf_segment(0)

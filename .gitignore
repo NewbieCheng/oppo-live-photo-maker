@@ -4,12 +4,30 @@ dist/
 *.spec
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+.eggs/
 
-# Test outputs
+# Test outputs / coverage
 tests/output/
 *.live.jpg
 test_out.jpg
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
 
 # IDE
 .vscode/
 .idea/
+
+# OS
+.DS_Store
+Thumbs.db

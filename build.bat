@@ -14,8 +14,9 @@ python -m PyInstaller ^
     --name OppoLivePhotoMaker ^
     --onefile ^
     --windowed ^
-    --add-data "exiftool_oppo.config;." ^
-    --collect-submodules src ^
+    --paths src ^
+    --add-data "src/oppo_live_photo/data/exiftool_oppo.config;oppo_live_photo/data" ^
+    --collect-submodules oppo_live_photo ^
     main.py || goto :err
 
 echo.
