@@ -1,0 +1,67 @@
+name: Bug report
+description: 实况图无法识别 / 转换出错 / 其他 bug
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 问题描述
+      description: 出了什么问题？预期行为是什么？
+      placeholder: 把视频转成 .live.jpg 放进相册后无法识别成实况图……
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 用 1080p mp4 跑 `oppo-live foo.mp4`
+        2. 把 .live.jpg 通过 OPPO 互传发到手机
+        3. 在相册中打开，没有实况标识
+    validations:
+      required: true
+
+  - type: input
+    id: phone-model
+    attributes:
+      label: OPPO 机型 + 系统版本
+      placeholder: Find X7 Ultra / ColorOS 14.0.1
+    validations:
+      required: true
+
+  - type: input
+    id: tool-versions
+    attributes:
+      label: ffmpeg / exiftool 版本
+      description: 在终端运行 `ffmpeg -version` 和 `exiftool -ver`
+      placeholder: ffmpeg 7.0 / exiftool 12.96
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统 + Python 版本
+      placeholder: Windows 11 / Python 3.11.6
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 错误输出 / 日志
+      render: shell
+
+  - type: checkboxes
+    id: transport
+    attributes:
+      label: 传输通道
+      description: 转出的文件如何送达手机？走压缩通道（普通微信图、QQ 图）会剥光元数据。
+      options:
+        - label: USB / 数据线 / SD 卡
+        - label: OPPO 互传
+        - label: 微信原图（点「原图」选项）
+        - label: 蓝牙
+        - label: 普通微信图片 / QQ 图片（不支持）
+        - label: 其他

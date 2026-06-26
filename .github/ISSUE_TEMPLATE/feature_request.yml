@@ -1,0 +1,20 @@
+name: Feature request
+description: 新功能 / 改进建议
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决的问题
+      placeholder: 我希望批量转换可以保留视频原始分辨率……
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案 / 已尝试的做法
