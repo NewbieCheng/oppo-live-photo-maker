@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
-from . import ffmpeg_utils, metadata, muxer
+from . import ffmpeg_utils, gui_styles, metadata, muxer
 
 
 class ConvertParams(TypedDict, total=False):
@@ -152,6 +152,69 @@ class VideoListWidget(QtWidgets.QListWidget):
             e.acceptProposedAction()
 
 
+# ---------- Shared UI helpers ------------------------------------------------
+
+def _make_chip(text: str, *, accent: bool = False) -> QtWidgets.QLabel:
+    chip = QtWidgets.QLabel(text)
+    chip.setObjectName("chipAccent" if accent else "chip")
+    return chip
+
+
+def _build_step_hint() -> QtWidgets.QWidget:
+    """Decorative step labels matching web StepIndicator."""
+    row = QtWidgets.QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(0)
+    labels = ["原生图", "视频", "元数据", "导出"]
+    for i, name in enumerate(labels):
+        if i > 0:
+            sep = QtWidgets.QLabel("—")
+            sep.setObjectName("stepHint")
+            sep.setAlignment(Qt.AlignCenter)
+            row.addWidget(sep)
+        lbl = QtWidgets.QLabel(name)
+        lbl.setObjectName("stepHintActive" if i == 0 else "stepHint")
+        lbl.setAlignment(Qt.AlignCenter)
+        row.addWidget(lbl)
+    row.addStretch(1)
+    wrap = QtWidgets.QWidget()
+    wrap.setLayout(row)
+    return wrap
+
+
+def _build_brand_header() -> QtWidgets.QWidget:
+    header = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout(header)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(8)
+
+    brand_row = QtWidgets.QHBoxLayout()
+    badge = QtWidgets.QLabel("●  LIVE")
+    badge.setObjectName("liveBadge")
+    title = QtWidgets.QLabel("实况图制作")
+    title.setObjectName("brandTitle")
+    brand_row.addWidget(badge)
+    brand_row.addWidget(title)
+    brand_row.addStretch(1)
+    layout.addLayout(brand_row)
+
+    tagline = QtWidgets.QLabel(
+        "机内原图 → 视频 → OPPO 相册可识别的 MotionPhoto · "
+        "支持 HEIC/JPG 元数据解析 · "
+    )
+    tagline.setObjectName("tagline")
+    tagline.setWordWrap(True)
+    accent = QtWidgets.QLabel("全程本地处理")
+    accent.setObjectName("taglineAccent")
+    tag_row = QtWidgets.QHBoxLayout()
+    tag_row.setContentsMargins(0, 0, 0, 0)
+    tag_row.addWidget(tagline)
+    tag_row.addWidget(accent)
+    tag_row.addStretch(1)
+    layout.addLayout(tag_row)
+    return header
+
+
 # ---------- Single convert tab ---------------------------------------------
 
 class SingleTab(QtWidgets.QWidget):
@@ -170,13 +233,17 @@ class SingleTab(QtWidgets.QWidget):
 
     def _build_ui(self):
         v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(12, 8, 12, 8)
+        v.setSpacing(12)
+
+        v.addWidget(_build_step_hint())
 
         # Top bar
         top = QtWidgets.QHBoxLayout()
         self.path_edit = QtWidgets.QLineEdit()
         self.path_edit.setPlaceholderText("请选择一个视频文件...")
         self.path_edit.setReadOnly(True)
-        btn_open = QtWidgets.QPushButton("打开视频...")
+        btn_open = QtWidgets.QPushButton("打开视频…")
         btn_open.clicked.connect(self._pick_video)
         top.addWidget(self.path_edit, 1)
         top.addWidget(btn_open)
@@ -259,8 +326,24 @@ class SingleTab(QtWidgets.QWidget):
         btn_clear_ref.clicked.connect(self._clear_reference)
         ref_row.addWidget(self.ref_edit, 1)
         ref_row.addWidget(btn_ref)
+        btn_clear_ref.setObjectName("ghostButton")
         ref_row.addWidget(btn_clear_ref)
         ref_layout.addLayout(ref_row)
+
+        desc = QtWidgets.QLabel(
+            "上传手机相册里的普通照片（机内直出的 JPG / HEIC 等），"
+            "工具会读取 Make、Model、拍摄时间、GPS 等 EXIF 并移植到实况图。"
+        )
+        desc.setObjectName("sectionDesc")
+        desc.setWordWrap(True)
+        ref_layout.addWidget(desc)
+
+        self.ref_chips_row = QtWidgets.QHBoxLayout()
+        self.ref_chips_row.setSpacing(6)
+        self.ref_chips_widget = QtWidgets.QWidget()
+        self.ref_chips_widget.setLayout(self.ref_chips_row)
+        self.ref_chips_widget.setVisible(False)
+        ref_layout.addWidget(self.ref_chips_widget)
 
         self.cover_mode_group = QtWidgets.QButtonGroup(self)
         self.radio_cover_video = QtWidgets.QRadioButton("封面来自视频帧")
@@ -286,6 +369,7 @@ class SingleTab(QtWidgets.QWidget):
             self.meta_fields[key] = edit
             meta_form.addRow(f"{key}：", edit)
         btn_reload_meta = QtWidgets.QPushButton("从参考图重新加载")
+        btn_reload_meta.setObjectName("ghostButton")
         btn_reload_meta.clicked.connect(self._reload_metadata_from_reference)
         meta_form.addRow("", btn_reload_meta)
         meta_scroll.setWidget(meta_widget)
@@ -329,12 +413,12 @@ class SingleTab(QtWidgets.QWidget):
         v.addLayout(out_row)
 
         self.btn_convert = QtWidgets.QPushButton("导出实况图")
-        self.btn_convert.setStyleSheet("padding: 10px; font-weight: bold;")
+        self.btn_convert.setObjectName("primaryButton")
         self.btn_convert.clicked.connect(self._do_convert)
         v.addWidget(self.btn_convert)
 
         self.status = QtWidgets.QLabel("就绪")
-        self.status.setStyleSheet("color: #888;")
+        self.status.setObjectName("statusLabel")
         v.addWidget(self.status)
 
     # --- video ---
@@ -428,6 +512,30 @@ class SingleTab(QtWidgets.QWidget):
         self.metadata_edits = metadata.NativeMetadataBundle()
         self.ref_edit.setText(str(path))
         self._populate_meta_fields(bundle)
+        self._update_ref_chips(path, bundle)
+
+    def _update_ref_chips(self, path: Path, bundle: metadata.NativeMetadataBundle) -> None:
+        while self.ref_chips_row.count():
+            item = self.ref_chips_row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        fmt = path.suffix.lstrip(".").upper() or "IMG"
+        field_count = len(bundle.exif) + len(bundle.iptc)
+        self.ref_chips_row.addWidget(_make_chip(fmt))
+        self.ref_chips_row.addWidget(_make_chip(f"{field_count} 项元数据"))
+        make = bundle.exif.get("EXIF:Make", "")
+        model = bundle.exif.get("EXIF:Model", "")
+        if make:
+            self.ref_chips_row.addWidget(_make_chip(make, accent=True))
+        if model:
+            self.ref_chips_row.addWidget(_make_chip(model, accent=True))
+        dt = bundle.exif.get("EXIF:DateTimeOriginal", "")
+        if dt:
+            self.ref_chips_row.addWidget(_make_chip(dt))
+        if bundle.exif.get("Composite:GPSLatitude"):
+            self.ref_chips_row.addWidget(_make_chip("GPS"))
+        self.ref_chips_row.addStretch(1)
+        self.ref_chips_widget.setVisible(True)
 
     def _clear_reference(self):
         self.reference_path = None
@@ -439,6 +547,11 @@ class SingleTab(QtWidgets.QWidget):
             edit.clear()
             edit.blockSignals(False)
         self.radio_cover_video.setChecked(True)
+        while self.ref_chips_row.count():
+            item = self.ref_chips_row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.ref_chips_widget.setVisible(False)
 
     def _populate_meta_fields(self, bundle: metadata.NativeMetadataBundle):
         mapping = {
@@ -574,11 +687,16 @@ class BatchTab(QtWidgets.QWidget):
 
     def _build_ui(self):
         v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(12, 8, 12, 8)
+        v.setSpacing(12)
 
-        v.addWidget(QtWidgets.QLabel(
+        hint = QtWidgets.QLabel(
             "把视频文件拖到下面的列表，或点击「添加视频」。"
             "每个文件都会按下方参数转换。"
-        ))
+        )
+        hint.setObjectName("sectionDesc")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
 
         self.list = VideoListWidget()
         self.list.files_dropped.connect(self._on_files_dropped)
@@ -636,7 +754,7 @@ class BatchTab(QtWidgets.QWidget):
 
         run_row = QtWidgets.QHBoxLayout()
         self.btn_run = QtWidgets.QPushButton("开始批量转换")
-        self.btn_run.setStyleSheet("padding: 10px; font-weight: bold;")
+        self.btn_run.setObjectName("primaryButton")
         self.btn_run.clicked.connect(self._run_batch)
         self.btn_stop = QtWidgets.QPushButton("停止")
         self.btn_stop.setEnabled(False)
@@ -646,6 +764,7 @@ class BatchTab(QtWidgets.QWidget):
         v.addLayout(run_row)
 
         self.status = QtWidgets.QLabel("就绪")
+        self.status.setObjectName("statusLabel")
         v.addWidget(self.status)
 
     def _on_files_dropped(self, files: list[Path]):
@@ -784,14 +903,28 @@ class MainWindow(QtWidgets.QMainWindow):
                   "或从 https://exiftool.org 安装并加入 PATH，然后重启本程序。"
             )
 
+        central = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(central)
+        layout.setContentsMargins(20, 20, 20, 12)
+        layout.setSpacing(16)
+
+        layout.addWidget(_build_brand_header())
+
         tabs = QtWidgets.QTabWidget()
         tabs.addTab(SingleTab(), "单视频转换")
         tabs.addTab(BatchTab(), "批量转换")
-        self.setCentralWidget(tabs)
+        layout.addWidget(tabs, 1)
+
+        footer = QtWidgets.QLabel("MIT · chaseZ · 未与 OPPO 官方关联")
+        footer.setObjectName("footerLabel")
+        layout.addWidget(footer)
+
+        self.setCentralWidget(central)
 
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
+    gui_styles.apply_app_style(app)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
