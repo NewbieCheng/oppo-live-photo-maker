@@ -13,6 +13,11 @@
  *   [ MP4 trailer ]
  */
 
+import {
+  applyNativeMetadata,
+  type NativeMetadataBundle,
+} from "./metadata";
+
 const enc = new TextEncoder();
 
 function concat(...parts: Uint8Array[]): Uint8Array {
@@ -71,6 +76,85 @@ function findInsertionPoint(jpeg: Uint8Array): number {
     lastAppEnd = i;
   }
   return lastAppEnd;
+}
+
+function isExifApp1Payload(payload: Uint8Array): boolean {
+  if (payload.length < 6) return false;
+  return new TextDecoder("ascii").decode(payload.subarray(0, 6)) === "Exif\0\0";
+}
+
+function isMotionXmpPayload(payload: Uint8Array): boolean {
+  const text = new TextDecoder("latin1").decode(payload);
+  return (
+    text.includes("http://ns.adobe.com/xap/1.0/") &&
+    (text.includes("GCamera:MotionPhoto") ||
+      text.includes("GCamera:MicroVideo") ||
+      text.includes("OpCamera:MotionPhotoOwner") ||
+      text.includes("Container:Directory"))
+  );
+}
+
+function isMpfPayload(payload: Uint8Array): boolean {
+  return payload.length >= 4 && new TextDecoder("ascii").decode(payload.subarray(0, 4)) === "MPF\0";
+}
+
+function hasExifApp1(jpeg: Uint8Array): boolean {
+  if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8) return false;
+  let i = 2;
+  const n = jpeg.length;
+  while (i < n - 1) {
+    while (i < n && jpeg[i] === 0xff && i + 1 < n && jpeg[i + 1] === 0xff) i++;
+    if (i >= n - 1 || jpeg[i] !== 0xff) break;
+    const marker = jpeg[i + 1];
+    if (marker === 0xda || marker === 0xd9) break;
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      i += 2;
+      continue;
+    }
+    if (i + 4 > n) break;
+    const segLen = (jpeg[i + 2] << 8) | jpeg[i + 3];
+    if (segLen < 2 || i + 2 + segLen > n) break;
+    const payload = jpeg.subarray(i + 4, i + 2 + segLen);
+    if (marker === 0xe1 && isExifApp1Payload(payload)) return true;
+    i += 2 + segLen;
+  }
+  return false;
+}
+
+/** Strip motion-photo XMP + MPF; keep native EXIF/IPTC segments. */
+function stripMotionPhotoMetadata(jpeg: Uint8Array): Uint8Array {
+  if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
+    throw new Error("Not a JPEG: missing SOI marker");
+  }
+  const out: number[] = [0xff, 0xd8];
+  let i = 2;
+  const n = jpeg.length;
+  while (i < n - 1) {
+    while (i < n && jpeg[i] === 0xff && i + 1 < n && jpeg[i + 1] === 0xff) i++;
+    if (i >= n - 1 || jpeg[i] !== 0xff) break;
+    const marker = jpeg[i + 1];
+    if (marker === 0xda || marker === 0xd9) {
+      for (let k = i; k < n; k++) out.push(jpeg[k]);
+      return new Uint8Array(out);
+    }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      out.push(0xff, marker);
+      i += 2;
+      continue;
+    }
+    if (i + 4 > n) break;
+    const segLen = (jpeg[i + 2] << 8) | jpeg[i + 3];
+    if (segLen < 2 || i + 2 + segLen > n) break;
+    const payload = jpeg.subarray(i + 4, i + 2 + segLen);
+    const drop =
+      (marker === 0xe2 && isMpfPayload(payload)) ||
+      (marker === 0xe1 && isMotionXmpPayload(payload));
+    if (!drop) {
+      for (let k = i; k < i + 2 + segLen; k++) out.push(jpeg[k]);
+    }
+    i += 2 + segLen;
+  }
+  return jpeg;
 }
 
 /** Strip any existing APP1/APP2 (EXIF/XMP/MPF) segments so re-muxing stays clean. */
@@ -206,6 +290,10 @@ function buildXmpPacket(fields: XmpFields): string {
     `    GCamera:MotionPhoto="1"\n` +
     `    GCamera:MotionPhotoVersion="1"\n` +
     `    GCamera:MotionPhotoPresentationTimestampUs="${ts}"\n` +
+    `    GCamera:MicroVideo="1"\n` +
+    `    GCamera:MicroVideoVersion="1"\n` +
+    `    GCamera:MicroVideoOffset="${len}"\n` +
+    `    GCamera:MicroVideoPresentationTimestampUs="${ts}"\n` +
     `    OpCamera:MotionPhotoPrimaryPresentationTimestampUs="${ts}"\n` +
     `    OpCamera:MotionPhotoOwner="oplus"\n` +
     `    OpCamera:OLivePhotoVersion="2"\n` +
@@ -300,6 +388,8 @@ function buildMpfSegment(imageSize: number): Uint8Array {
 
 export interface MuxOptions {
   presentationTimestampUs?: number;
+  nativeMetadata?: NativeMetadataBundle;
+  referenceJpeg?: Uint8Array;
 }
 
 /**
@@ -312,23 +402,33 @@ export function buildOppoMotionPhoto(
   videoMp4: Uint8Array,
   options: MuxOptions = {},
 ): Uint8Array {
-  const cleanJpeg = stripExistingMetadata(coverJpeg);
-  const exif = buildExifApp1();
+  const hasNative = Boolean(options.nativeMetadata || options.referenceJpeg);
+  let prepared = coverJpeg;
+  if (hasNative) {
+    prepared = applyNativeMetadata(
+      coverJpeg,
+      options.nativeMetadata,
+      options.referenceJpeg,
+    );
+  }
+
+  const cleanJpeg = hasNative
+    ? stripMotionPhotoMetadata(prepared)
+    : stripExistingMetadata(prepared);
+
+  const ts = options.presentationTimestampUs ?? 0;
   const xmp = buildXmpApp1({
     videoLength: videoMp4.length,
-    presentationTimestampUs: options.presentationTimestampUs ?? 0,
+    presentationTimestampUs: ts,
   });
 
-  // Inject EXIF + XMP first (right after SOI), then re-scan to place the MPF
-  // segment after them. The MPF length depends on the final JPEG size, but
-  // its byte length is constant, so we can size it before computing.
   const insAfterSoi = findInsertionPoint(cleanJpeg);
-  const withMeta = concat(
-    cleanJpeg.subarray(0, insAfterSoi),
-    exif,
-    xmp,
-    cleanJpeg.subarray(insAfterSoi),
-  );
+  const parts: Uint8Array[] = [cleanJpeg.subarray(0, insAfterSoi)];
+  if (!hasExifApp1(cleanJpeg)) {
+    parts.push(buildExifApp1());
+  }
+  parts.push(xmp, cleanJpeg.subarray(insAfterSoi));
+  const withMeta = concat(...parts);
 
   const dummyMpf = buildMpfSegment(0);
   const finalSize = withMeta.length + dummyMpf.length;
@@ -351,6 +451,8 @@ export function buildOppoMotionPhoto(
 export const _internal = {
   findInsertionPoint,
   stripExistingMetadata,
+  stripMotionPhotoMetadata,
+  hasExifApp1,
   buildMpfSegment,
   buildExifApp1,
   buildXmpApp1,

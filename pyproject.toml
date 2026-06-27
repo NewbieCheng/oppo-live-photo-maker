@@ -9,7 +9,7 @@ description = "Convert any video into an OPPO MotionPhoto (Live Photo) JPEG."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
-authors = [{ name = "Young-Spark" }]
+authors = [{ name = "chaseZ" }]
 keywords = ["oppo", "motionphoto", "live-photo", "jpeg", "mp4"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -47,8 +47,8 @@ oppo-live = "oppo_live_photo.cli:main_entry"
 oppo-live-gui = "oppo_live_photo.gui:main"
 
 [project.urls]
-Homepage = "https://github.com/Young-Spark/oppo-live-photo-maker"
-Issues = "https://github.com/Young-Spark/oppo-live-photo-maker/issues"
+Homepage = "https://github.com/NewbieCheng/oppo-live-photo-maker"
+Issues = "https://github.com/NewbieCheng/oppo-live-photo-maker/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/oppo_live_photo"]

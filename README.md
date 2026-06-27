@@ -1,13 +1,13 @@
 # OPPO Live Photo Maker
 
-[![CI](https://github.com/Young-Spark/oppo-live-photo-maker/actions/workflows/ci.yml/badge.svg)](https://github.com/Young-Spark/oppo-live-photo-maker/actions/workflows/ci.yml)
+[![CI](https://github.com/NewbieCheng/oppo-live-photo-maker/actions/workflows/ci.yml/badge.svg)](https://github.com/NewbieCheng/oppo-live-photo-maker/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#)
 
 把任意视频转换成 OPPO 手机相册识别的「实况图片」（MotionPhoto）。
 
-> 🌐 **[在线版（推荐）→ Young-Spark.github.io/oppo-live-photo-maker](https://young-spark.github.io/oppo-live-photo-maker/)**
+> 🌐 **[在线版（推荐）→ NewbieCheng.github.io/oppo-live-photo-maker](https://newbiecheng.github.io/oppo-live-photo-maker/)**
 >
 > 浏览器内完成，零安装、零上传，视频不会离开你的设备。
 > 需要支持 WebCodecs API 的现代浏览器：**Chrome / Edge 94+** 或 **Safari 16.4+** 或 **Firefox 130+**。
@@ -43,20 +43,20 @@ exiftool -ver
 ### 2. Python 包
 
 ```cmd
-pip install git+https://github.com/Young-Spark/oppo-live-photo-maker.git
+pip install git+https://github.com/NewbieCheng/oppo-live-photo-maker.git
 ```
 
 或本地开发：
 
 ```cmd
-git clone https://github.com/Young-Spark/oppo-live-photo-maker.git
+git clone https://github.com/NewbieCheng/oppo-live-photo-maker.git
 cd oppo-live-photo-maker
 pip install -e ".[dev]"
 ```
 
 ### 3. Windows 单文件 EXE（可选）
 
-不想装 Python 的用户：在 [Releases](https://github.com/Young-Spark/oppo-live-photo-maker/releases) 下载 `OppoLivePhotoMaker.exe`，双击运行。**仍需自行安装 ffmpeg / exiftool 并加入 PATH。**
+不想装 Python 的用户：在 [Releases](https://github.com/NewbieCheng/oppo-live-photo-maker/releases) 下载 `OppoLivePhotoMaker.exe`，双击运行。**仍需自行安装 ffmpeg / exiftool 并加入 PATH。**
 
 ## 用法
 
@@ -77,16 +77,34 @@ python main.py
 1. 点「打开视频...」选视频
 2. 播放预览，移动到想要的位置点「此处设为起点」
 3. 再移动到想要的封面位置点「此处设为封面」
-4. 点「导出实况图」
-5. 默认输出到 `<视频名>.live.jpg`
+4. （可选）选择**参考原生图**，编辑 EXIF/IPTC 字段，或切换「封面来自参考图」
+5. 点「导出实况图」
+6. 默认输出到 `<视频名>.live.jpg`
 
 **批量 Tab**：拖文件进列表 → 点「开始批量转换」。失败会在末尾汇总，不会逐个弹窗。
+
+### 原生元数据（参考图）
+
+对齐 [live-photo-conv](https://github.com/wszqkzqk/live-photo-conv) 的 `copy-img-meta --exclude-xmp` 逻辑：
+
+| 模式 | 说明 |
+|------|------|
+| **仅移植元数据** | 封面仍从视频帧抽取；参考图的 EXIF/IPTC 写入输出（不含实况 XMP） |
+| **参考图作封面** | 参考图 JPEG 作为静态封面像素 + 元数据来源 |
+
+- EXIF `UserComment` 始终强制为 `Oplus_8388608`（OPPO 识别必需）
+- 同时写入 Google MotionPhoto 与 MicroVideo（旧标准）XMP 标签
+
+**在线版**：步骤 2「参考图」→ 步骤 3「原生数据」中上传、编辑。
 
 ### 命令行
 
 ```cmd
 oppo-live VIDEO.mp4
 oppo-live VIDEO.mp4 -o out.jpg --start 5 --duration 3 --cover-time 5.5
+oppo-live VIDEO.mp4 --reference-image ref.jpg
+oppo-live VIDEO.mp4 --reference-image ref.jpg --cover-mode reference
+oppo-live VIDEO.mp4 --reference-image ref.jpg --make OPLUS --model "Find X7" --gps "31.2,121.5"
 ```
 
 完整参数：
@@ -99,6 +117,13 @@ oppo-live VIDEO.mp4 -o out.jpg --start 5 --duration 3 --cover-time 5.5
 --crf N          x264 CRF（越小越精细），默认 23
 --audio-kbps N   AAC 码率，默认 128
 --preset NAME    x264 preset，默认 fast
+--reference-image PATH   参考原生图（移植 EXIF/IPTC）
+--cover-mode {video,reference}  封面像素来源，默认 video
+--metadata-json PATH     JSON 覆盖 exif/iptc 字段
+--datetime STR           覆盖 EXIF:DateTimeOriginal
+--make / --model STR     覆盖相机品牌/型号
+--gps "lat,lon[,alt]"    覆盖 GPS
+--presentation-ts-us N   覆盖 MotionPhoto 时间戳（微秒）
 -q, --quiet      静默模式
 -V, --version    版本号
 ```
@@ -131,6 +156,7 @@ src/oppo_live_photo/
   __init__.py
   cli.py            命令行入口（installed as `oppo-live`）
   gui.py            PySide6 GUI（installed as `oppo-live-gui`）
+  metadata.py       原生 EXIF/IPTC 解析与移植
   muxer.py          OPPO MotionPhoto 文件结构编码
   ffmpeg_utils.py   ffmpeg / ffprobe 调用
   data/
@@ -158,7 +184,7 @@ build.bat           Windows 打 EXE 脚本
 
 已验证：Find X7 Ultra（ColorOS 14）
 
-如果你在其他 OPPO / OnePlus / realme 机型上验证成功（或失败），欢迎在 [Issue 区](https://github.com/Young-Spark/oppo-live-photo-maker/issues) 反馈，我会更新这里的列表。
+如果你在其他 OPPO / OnePlus / realme 机型上验证成功（或失败），欢迎在 [Issue 区](https://github.com/NewbieCheng/oppo-live-photo-maker/issues) 反馈，我会更新这里的列表。
 
 ## 开发
 
@@ -179,8 +205,9 @@ CI 在每次 push / PR 自动跑 ruff + pytest（Linux / macOS / Windows × Pyth
 `web/` 子目录是同一格式的纯前端 TypeScript + Vue3 实现，部署在 GitHub Pages 上：
 
 - `web/src/lib/muxer.ts` — 用纯 JS 写 OPPO MotionPhoto 字节结构（**不依赖 exiftool**）
+- `web/src/lib/metadata/` — 浏览器内 EXIF/IPTC 解析、移植与编辑
 - `web/src/lib/webcodecs.ts` — 基于 [mediabunny](https://mediabunny.dev/) + WebCodecs API 的硬件加速解码 / 编码 / 封装
-- `web/src/App.vue` — 简洁单页 UI
+- `web/src/App.vue` — 四步向导 UI（视频 → 参考图 → 原生数据 → 导出）
 
 浏览器要求：**Chrome / Edge 94+** 或 **Safari 16.4+** 或 **Firefox 130+**（必须支持 WebCodecs API）。
 

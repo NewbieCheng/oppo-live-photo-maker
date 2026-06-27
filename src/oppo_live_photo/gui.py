@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
-from . import ffmpeg_utils, muxer
+from . import ffmpeg_utils, metadata, muxer
 
 
 class ConvertParams(TypedDict, total=False):
@@ -24,6 +24,10 @@ class ConvertParams(TypedDict, total=False):
     crf: int
     audio_kbps: int
     preset: str
+    reference_image: str
+    cover_mode: str
+    metadata_overrides: metadata.NativeMetadataBundle
+    presentation_timestamp_us: int
 
 
 # ---------- Worker thread ---------------------------------------------------
@@ -61,12 +65,22 @@ class ConvertWorker(QtCore.QObject):
                 if self._cancel:
                     raise RuntimeError("已取消")
 
-                self.progress.emit("正在抽取封面帧...")
-                ffmpeg_utils.extract_cover(
-                    self.video, cover,
-                    timestamp=p["cover_time"],
-                    target_long_edge=p["long_edge"],
-                )
+                reference = Path(p["reference_image"]) if p.get("reference_image") else None
+                cover_mode = p.get("cover_mode", "video")
+
+                if cover_mode == "reference" and reference is not None:
+                    self.progress.emit("正在准备参考图封面...")
+                    ffmpeg_utils.prepare_reference_cover(
+                        reference, cover,
+                        target_long_edge=p["long_edge"],
+                    )
+                else:
+                    self.progress.emit("正在抽取封面帧...")
+                    ffmpeg_utils.extract_cover(
+                        self.video, cover,
+                        timestamp=p["cover_time"],
+                        target_long_edge=p["long_edge"],
+                    )
                 if self._cancel:
                     raise RuntimeError("已取消")
 
@@ -85,7 +99,14 @@ class ConvertWorker(QtCore.QObject):
                     raise RuntimeError("已取消")
 
                 self.progress.emit("正在合成 OPPO 实况图...")
-                muxer.write_oppo_motionphoto(cover, clip, self.output)
+                muxer.write_oppo_motionphoto(
+                    cover,
+                    clip,
+                    self.output,
+                    presentation_timestamp_us=p.get("presentation_timestamp_us", 0),
+                    reference_jpg=reference,
+                    metadata_overrides=p.get("metadata_overrides"),
+                )
             self.finished.emit(self.output)
         except Exception as e:
             tb = traceback.format_exc()
@@ -141,6 +162,9 @@ class SingleTab(QtWidgets.QWidget):
         self.thread: QtCore.QThread | None = None
         self.worker: ConvertWorker | None = None
         self._cover_user_set = False
+        self.reference_path: Path | None = None
+        self.reference_bundle: metadata.NativeMetadataBundle | None = None
+        self.metadata_edits = metadata.NativeMetadataBundle()
 
         self._build_ui()
 
@@ -221,6 +245,53 @@ class SingleTab(QtWidgets.QWidget):
         form.addRow("封面帧位置：", self.spin_cover)
 
         v.addWidget(form_box)
+
+        # Reference image + metadata
+        ref_box = QtWidgets.QGroupBox("参考原生图（可选）")
+        ref_layout = QtWidgets.QVBoxLayout(ref_box)
+        ref_row = QtWidgets.QHBoxLayout()
+        self.ref_edit = QtWidgets.QLineEdit()
+        self.ref_edit.setPlaceholderText("选择相机原图以移植 EXIF/IPTC…")
+        self.ref_edit.setReadOnly(True)
+        btn_ref = QtWidgets.QPushButton("选择参考图...")
+        btn_ref.clicked.connect(self._pick_reference)
+        btn_clear_ref = QtWidgets.QPushButton("清除")
+        btn_clear_ref.clicked.connect(self._clear_reference)
+        ref_row.addWidget(self.ref_edit, 1)
+        ref_row.addWidget(btn_ref)
+        ref_row.addWidget(btn_clear_ref)
+        ref_layout.addLayout(ref_row)
+
+        self.cover_mode_group = QtWidgets.QButtonGroup(self)
+        self.radio_cover_video = QtWidgets.QRadioButton("封面来自视频帧")
+        self.radio_cover_ref = QtWidgets.QRadioButton("封面来自参考图")
+        self.radio_cover_video.setChecked(True)
+        self.cover_mode_group.addButton(self.radio_cover_video)
+        self.cover_mode_group.addButton(self.radio_cover_ref)
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.addWidget(self.radio_cover_video)
+        mode_row.addWidget(self.radio_cover_ref)
+        ref_layout.addLayout(mode_row)
+
+        meta_scroll = QtWidgets.QScrollArea()
+        meta_scroll.setWidgetResizable(True)
+        meta_scroll.setMaximumHeight(220)
+        meta_widget = QtWidgets.QWidget()
+        meta_form = QtWidgets.QFormLayout(meta_widget)
+        self.meta_fields: dict[str, QtWidgets.QLineEdit] = {}
+        for key in ("Make", "Model", "DateTimeOriginal", "GPSLatitude", "GPSLongitude"):
+            edit = QtWidgets.QLineEdit()
+            edit.setPlaceholderText(key)
+            edit.textChanged.connect(self._on_meta_edit)
+            self.meta_fields[key] = edit
+            meta_form.addRow(f"{key}：", edit)
+        btn_reload_meta = QtWidgets.QPushButton("从参考图重新加载")
+        btn_reload_meta.clicked.connect(self._reload_metadata_from_reference)
+        meta_form.addRow("", btn_reload_meta)
+        meta_scroll.setWidget(meta_widget)
+        ref_layout.addWidget(QtWidgets.QLabel("原生数据（可编辑）："))
+        ref_layout.addWidget(meta_scroll)
+        v.addWidget(ref_box)
 
         # Advanced
         adv_box = QtWidgets.QGroupBox("高级参数（可选）")
@@ -338,6 +409,75 @@ class SingleTab(QtWidgets.QWidget):
         if not self._cover_user_set:
             self.spin_cover.setValue(v)
 
+    def _pick_reference(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择参考原生图", "",
+            "图片 (*.jpg *.jpeg *.JPG *.JPEG);;所有文件 (*.*)"
+        )
+        if path:
+            self.load_reference(Path(path))
+
+    def load_reference(self, path: Path):
+        try:
+            bundle = metadata.parse_reference_image(path)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "读取参考图失败", str(e))
+            return
+        self.reference_path = path
+        self.reference_bundle = bundle
+        self.metadata_edits = metadata.NativeMetadataBundle()
+        self.ref_edit.setText(str(path))
+        self._populate_meta_fields(bundle)
+
+    def _clear_reference(self):
+        self.reference_path = None
+        self.reference_bundle = None
+        self.metadata_edits = metadata.NativeMetadataBundle()
+        self.ref_edit.clear()
+        for edit in self.meta_fields.values():
+            edit.blockSignals(True)
+            edit.clear()
+            edit.blockSignals(False)
+        self.radio_cover_video.setChecked(True)
+
+    def _populate_meta_fields(self, bundle: metadata.NativeMetadataBundle):
+        mapping = {
+            "Make": bundle.exif.get("EXIF:Make", ""),
+            "Model": bundle.exif.get("EXIF:Model", ""),
+            "DateTimeOriginal": bundle.exif.get("EXIF:DateTimeOriginal", ""),
+            "GPSLatitude": bundle.exif.get("Composite:GPSLatitude", ""),
+            "GPSLongitude": bundle.exif.get("Composite:GPSLongitude", ""),
+        }
+        for key, edit in self.meta_fields.items():
+            edit.blockSignals(True)
+            edit.setText(mapping.get(key, ""))
+            edit.blockSignals(False)
+
+    def _reload_metadata_from_reference(self):
+        if self.reference_bundle:
+            self.metadata_edits = metadata.NativeMetadataBundle()
+            self._populate_meta_fields(self.reference_bundle)
+
+    def _on_meta_edit(self):
+        exif_map = {
+            "Make": "EXIF:Make",
+            "Model": "EXIF:Model",
+            "DateTimeOriginal": "EXIF:DateTimeOriginal",
+            "GPSLatitude": "Composite:GPSLatitude",
+            "GPSLongitude": "Composite:GPSLongitude",
+        }
+        self.metadata_edits = metadata.NativeMetadataBundle()
+        for key, edit in self.meta_fields.items():
+            text = edit.text().strip()
+            if text:
+                self.metadata_edits.exif[exif_map[key]] = text
+
+    def _build_metadata_for_mux(self) -> metadata.NativeMetadataBundle | None:
+        if not self.reference_bundle and not self.metadata_edits.exif:
+            return None
+        base = self.reference_bundle or metadata.NativeMetadataBundle()
+        return metadata.merge_bundles(base, self.metadata_edits)
+
     # --- output ---
     def _pick_output(self):
         if not self.video_path:
@@ -353,8 +493,28 @@ class SingleTab(QtWidgets.QWidget):
         if not self.video_path:
             QtWidgets.QMessageBox.warning(self, "未选择视频", "请先选择一个视频文件。")
             return
+        if self.radio_cover_ref.isChecked() and not self.reference_path:
+            QtWidgets.QMessageBox.warning(
+                self, "缺少参考图", "封面来自参考图时，请先选择参考原生图。"
+            )
+            return
         out = Path(self.out_edit.text()) if self.out_edit.text().strip() \
             else self.video_path.with_suffix(".live.jpg")
+
+        cover_mode: metadata.CoverMode = (
+            "reference" if self.radio_cover_ref.isChecked() else "video"
+        )
+        meta_for_mux = self._build_metadata_for_mux()
+        ref_bundle = self.reference_bundle
+        presentation_ts = metadata.compute_presentation_timestamp_us(
+            cover_mode=cover_mode,
+            cover_time=self.spin_cover.value(),
+            start=self.spin_start.value(),
+            reference_ts=ref_bundle.presentation_timestamp_us if ref_bundle else None,
+            user_override=meta_for_mux.presentation_timestamp_us if meta_for_mux else None,
+            user_set=bool(meta_for_mux and meta_for_mux.presentation_timestamp_user_set),
+        )
+
         params: ConvertParams = {
             "start": self.spin_start.value(),
             "duration": self.spin_duration.value(),
@@ -362,7 +522,12 @@ class SingleTab(QtWidgets.QWidget):
             "long_edge": self.spin_long_edge.value(),
             "crf": self.spin_crf.value(),
             "audio_kbps": self.spin_audio.value(),
+            "cover_mode": cover_mode,
+            "presentation_timestamp_us": presentation_ts,
+            "metadata_overrides": meta_for_mux,
         }
+        if self.reference_path:
+            params["reference_image"] = str(self.reference_path)
         self._run_worker(self.video_path, out, params)
 
     def _run_worker(self, video: Path, output: Path, params: ConvertParams):

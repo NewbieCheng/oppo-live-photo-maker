@@ -108,8 +108,11 @@ describe("JPEG insertion point", () => {
 
 describe("XMP packet", () => {
   it("contains all required OPPO MotionPhoto fields", () => {
-    const x = buildXmpPacket({ videoLength: 12345 });
+    const x = buildXmpPacket({ videoLength: 12345, presentationTimestampUs: 500000 });
     expect(x).toContain('GCamera:MotionPhoto="1"');
+    expect(x).toContain('GCamera:MicroVideo="1"');
+    expect(x).toContain('GCamera:MicroVideoOffset="12345"');
+    expect(x).toContain('GCamera:MicroVideoPresentationTimestampUs="500000"');
     expect(x).toContain('OpCamera:MotionPhotoOwner="oplus"');
     expect(x).toContain('OpCamera:OLivePhotoVersion="2"');
     expect(x).toContain('OpCamera:VideoLength="12345"');

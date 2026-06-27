@@ -256,3 +256,42 @@ export async function transcodeClipWebCodecs(
     await input.dispose();
   }
 }
+
+// ---------- Reference JPEG cover (scale to long edge) --------------------
+
+export async function loadReferenceCover(
+  file: Blob,
+  options: { longEdge: number },
+): Promise<Uint8Array> {
+  const bitmap = await createImageBitmap(file);
+  try {
+    const srcW = bitmap.width;
+    const srcH = bitmap.height;
+    const longEdge = options.longEdge;
+    const isLandscape = srcW >= srcH;
+    const outW = isLandscape
+      ? longEdge
+      : Math.max(2, Math.round(((srcW * longEdge) / srcH) / 2) * 2);
+    const outH = isLandscape
+      ? Math.max(2, Math.round(((srcH * longEdge) / srcW) / 2) * 2)
+      : longEdge;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = outW;
+    canvas.height = outH;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas 2D unavailable");
+    ctx.drawImage(bitmap, 0, 0, outW, outH);
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error("toBlob returned null"))),
+        "image/jpeg",
+        0.92,
+      );
+    });
+    return new Uint8Array(await blob.arrayBuffer());
+  } finally {
+    bitmap.close();
+  }
+}

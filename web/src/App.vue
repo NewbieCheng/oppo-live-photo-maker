@@ -1,19 +1,42 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import StepIndicator from "./components/StepIndicator.vue";
+import VideoStep from "./components/VideoStep.vue";
+import ReferenceStep from "./components/ReferenceStep.vue";
+import MetadataEditor from "./components/MetadataEditor.vue";
+import ExportStep from "./components/ExportStep.vue";
 import {
   extractCoverWebCodecs,
   hasWebCodecsApi,
+  loadReferenceCover,
   probeAndCheck,
   transcodeClipWebCodecs,
   type VideoInfo,
 } from "./lib/webcodecs";
 import { buildOppoMotionPhoto } from "./lib/muxer";
+import {
+  computePresentationTimestampUs,
+  emptyBundle,
+  mergeBundles,
+  parseReferenceImageSync,
+  type CoverMode,
+  type NativeMetadataBundle,
+} from "./lib/metadata";
 
+const STEP_LABELS = ["视频", "参考图", "原生数据", "导出"];
+
+const step = ref(1);
 const file = ref<File | null>(null);
 const info = ref<VideoInfo | null>(null);
-const previewUrl = ref<string>("");
-const videoEl = ref<HTMLVideoElement | null>(null);
+const previewUrl = ref("");
 const dragOver = ref(false);
+
+const referenceFile = ref<File | null>(null);
+const referenceBytes = ref<Uint8Array | null>(null);
+const referencePreviewUrl = ref("");
+const referenceBundle = ref<NativeMetadataBundle | null>(null);
+const metadataEdits = ref<NativeMetadataBundle>(emptyBundle());
+const coverMode = ref<CoverMode>("videoFrame");
 
 const unsupported = ref<{ reason: string; codec?: string } | null>(null);
 
@@ -22,36 +45,49 @@ const duration = ref(3);
 const coverTime = ref(0);
 const longEdge = ref(1920);
 const audioKbps = ref(128);
-const showAdvanced = ref(false);
 
 const status = ref<"idle" | "running" | "done" | "error">("idle");
 const statusText = ref("");
 const errorText = ref("");
 const log = ref<string[]>([]);
-// Used as a template ref for auto-scroll; kept declared even if not currently
-// driven from script.
-const logEl = ref<HTMLElement | null>(null);
-void logEl;
-const progress = ref(0); // 0..1
+const progress = ref(0);
 const resultUrl = ref("");
 const resultName = ref("");
 const resultSize = ref(0);
 
 const browserHasWebCodecs = hasWebCodecsApi();
 
-const formatTime = (s: number) => (isFinite(s) ? s.toFixed(2) : "0.00");
-const positionLabel = computed(() => {
-  const cur = videoEl.value?.currentTime ?? 0;
-  const dur = info.value?.duration ?? 0;
-  return `${formatTime(cur)} 秒 / ${formatTime(dur)} 秒`;
+const dirtyKeys = computed(() => {
+  const keys = new Set<string>();
+  if (!referenceBundle.value) {
+    for (const k of Object.keys(metadataEdits.value.exif)) keys.add(`exif:${k}`);
+    for (const k of Object.keys(metadataEdits.value.iptc)) keys.add(`iptc:${k}`);
+    return keys;
+  }
+  const base = referenceBundle.value;
+  for (const [k, v] of Object.entries(metadataEdits.value.exif)) {
+    if (base.exif[k] !== v) keys.add(`exif:${k}`);
+  }
+  for (const [k, v] of Object.entries(metadataEdits.value.iptc)) {
+    if (base.iptc[k] !== v) keys.add(`iptc:${k}`);
+  }
+  return keys;
 });
+
+const canConvert = computed(
+  () =>
+    !!file.value &&
+    !!info.value &&
+    !unsupported.value &&
+    (coverMode.value !== "referenceImage" || !!referenceFile.value),
+);
 
 function pickFile() {
   const inp = document.createElement("input");
   inp.type = "file";
   inp.accept = "video/*";
   inp.onchange = () => {
-    if (inp.files && inp.files[0]) loadFile(inp.files[0]);
+    if (inp.files?.[0]) loadFile(inp.files[0]);
   };
   inp.click();
 }
@@ -64,6 +100,7 @@ async function loadFile(f: File) {
   previewUrl.value = URL.createObjectURL(f);
   status.value = "idle";
   statusText.value = "正在读取视频信息…";
+  step.value = 1;
   try {
     const result = await probeAndCheck(f);
     info.value = result.info;
@@ -75,11 +112,47 @@ async function loadFile(f: File) {
     start.value = 0;
     coverTime.value = 0;
     duration.value = Math.min(3, Math.max(0.5, result.info.duration || 3));
-    statusText.value = `${f.name} · ${result.info.width}×${result.info.height} · ${formatTime(result.info.duration)} 秒 · ${result.info.codec}`;
+    statusText.value = `${f.name} · ${result.info.width}×${result.info.height}`;
   } catch (e) {
     status.value = "error";
     errorText.value = (e as Error).message;
   }
+}
+
+function pickReference() {
+  const inp = document.createElement("input");
+  inp.type = "file";
+  inp.accept = "image/jpeg,image/jpg,.jpg,.jpeg";
+  inp.onchange = () => {
+    if (inp.files?.[0]) loadReference(inp.files[0]);
+  };
+  inp.click();
+}
+
+function loadReference(f: File) {
+  if (referencePreviewUrl.value) URL.revokeObjectURL(referencePreviewUrl.value);
+  referenceFile.value = f;
+  referencePreviewUrl.value = URL.createObjectURL(f);
+  f.arrayBuffer().then((buf) => {
+    referenceBytes.value = new Uint8Array(buf);
+    try {
+      referenceBundle.value = parseReferenceImageSync(referenceBytes.value);
+      metadataEdits.value = emptyBundle();
+    } catch (e) {
+      referenceBundle.value = null;
+      errorText.value = `参考图解析失败: ${(e as Error).message}`;
+    }
+  });
+}
+
+function clearReference() {
+  if (referencePreviewUrl.value) URL.revokeObjectURL(referencePreviewUrl.value);
+  referenceFile.value = null;
+  referenceBytes.value = null;
+  referencePreviewUrl.value = "";
+  referenceBundle.value = null;
+  metadataEdits.value = emptyBundle();
+  coverMode.value = "videoFrame";
 }
 
 function onDrop(e: DragEvent) {
@@ -89,18 +162,19 @@ function onDrop(e: DragEvent) {
   if (f) loadFile(f);
 }
 
-function setStartFromCurrent() {
-  if (!videoEl.value) return;
-  start.value = +videoEl.value.currentTime.toFixed(2);
-}
-function setCoverFromCurrent() {
-  if (!videoEl.value) return;
-  coverTime.value = +videoEl.value.currentTime.toFixed(2);
+function reloadMetadataFromReference() {
+  if (referenceBundle.value) metadataEdits.value = emptyBundle();
 }
 
-watch(start, (v) => {
-  if (Math.abs(coverTime.value - v) < 0.5) coverTime.value = v;
-});
+function buildMetadataForMux(): NativeMetadataBundle | undefined {
+  const base = referenceBundle.value ?? emptyBundle();
+  const merged = mergeBundles(base, metadataEdits.value);
+  const hasData =
+    Object.keys(merged.exif).length ||
+    Object.keys(merged.iptc).length ||
+    referenceBytes.value;
+  return hasData ? merged : undefined;
+}
 
 function resetResult() {
   if (resultUrl.value) URL.revokeObjectURL(resultUrl.value);
@@ -116,17 +190,30 @@ async function convert() {
   if (!file.value || !info.value) return;
   resetResult();
   status.value = "running";
+  step.value = 4;
 
   try {
-    statusText.value = "[1/3] 正在抽取封面帧…";
-    progress.value = 0;
-    const cover = await extractCoverWebCodecs(file.value, {
-      timestamp: coverTime.value,
-      longEdge: longEdge.value,
+    const meta = buildMetadataForMux();
+    const presentationTs = computePresentationTimestampUs({
+      coverMode: coverMode.value,
+      coverTime: coverTime.value,
+      start: start.value,
+      referenceTimestampUs: referenceBundle.value?.presentationTimestampUs,
+      userOverrideUs: metadataEdits.value.presentationTimestampUs,
+      userSet: metadataEdits.value.presentationTimestampUserSet,
     });
 
-    statusText.value = "[2/3] 正在转码视频片段…";
+    statusText.value = "[1/3] 正在准备封面…";
     progress.value = 0;
+    const cover =
+      coverMode.value === "referenceImage" && referenceFile.value
+        ? await loadReferenceCover(referenceFile.value, { longEdge: longEdge.value })
+        : await extractCoverWebCodecs(file.value, {
+            timestamp: coverTime.value,
+            longEdge: longEdge.value,
+          });
+
+    statusText.value = "[2/3] 正在转码视频片段…";
     const clip = await transcodeClipWebCodecs(file.value, {
       start: start.value,
       duration: duration.value,
@@ -140,7 +227,11 @@ async function convert() {
     });
 
     statusText.value = "[3/3] 正在合成 OPPO 实况图…";
-    const livePhoto = buildOppoMotionPhoto(cover, clip);
+    const livePhoto = buildOppoMotionPhoto(cover, clip, {
+      presentationTimestampUs: presentationTs,
+      nativeMetadata: meta,
+      referenceJpeg: referenceBytes.value ?? undefined,
+    });
 
     const blob = new Blob([livePhoto.buffer as ArrayBuffer], { type: "image/jpeg" });
     if (resultUrl.value) URL.revokeObjectURL(resultUrl.value);
@@ -149,526 +240,278 @@ async function convert() {
     resultName.value = `${stem}.live.jpg`;
     resultSize.value = blob.size;
     status.value = "done";
-    statusText.value = `完成！${(blob.size / 1024 / 1024).toFixed(2)} MB`;
+    statusText.value = `完成 · ${(blob.size / 1024 / 1024).toFixed(2)} MB`;
     progress.value = 1;
   } catch (e) {
     status.value = "error";
     errorText.value = (e as Error).message ?? String(e);
-    statusText.value = "失败";
+    statusText.value = "转换失败";
   }
 }
 
+watch(referenceFile, (f) => {
+  if (!f && coverMode.value === "referenceImage") coverMode.value = "videoFrame";
+});
+
 onBeforeUnmount(() => {
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
+  if (referencePreviewUrl.value) URL.revokeObjectURL(referencePreviewUrl.value);
   if (resultUrl.value) URL.revokeObjectURL(resultUrl.value);
 });
 
-const REPO_URL = "https://github.com/Young-Spark/oppo-live-photo-maker";
+const REPO_URL = "https://github.com/NewbieCheng/oppo-live-photo-maker";
+const AUTHOR_URL = "https://github.com/NewbieCheng";
 </script>
 
 <template>
-  <a
-    class="github-corner"
-    :href="REPO_URL"
-    target="_blank"
-    rel="noopener"
-    aria-label="GitHub"
-    title="GitHub 仓库"
-  >
-    <svg width="64" height="64" viewBox="0 0 250 250">
-      <path d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z" fill="#1677ff" />
-      <path
-        d="M128.3,109.0 C113.8,99.7 119.0,89.6 119.0,89.6 C122.0,82.7 120.5,78.6 120.5,78.6 C119.2,72.0 123.4,76.3 123.4,76.3 C127.3,80.9 125.5,87.3 125.5,87.3 C122.9,97.6 130.6,101.9 134.4,103.2"
-        fill="none"
-        stroke="#fff"
-        stroke-width="2"
-        class="octo-arm"
-      />
-      <path
-        d="M115.0,115.0 C114.9,115.1 118.7,116.5 119.8,115.4 L133.7,101.6 C136.9,99.2 139.9,98.4 142.2,98.6 C133.8,90.4 119.5,82.0 119.5,68.0 C119.5,61.5 121.4,56.4 124.0,52.7 C123.5,50.7 121.5,42.3 124.7,38.4 C124.7,38.4 132.0,38.0 142.5,49.6 C145.4,48.3 149.0,47.5 153.0,47.5 C157.0,47.5 160.6,48.3 163.5,49.6 C174.0,38.0 181.3,38.4 181.3,38.4 C184.5,42.3 182.5,50.7 182.0,52.7 C184.6,56.4 186.5,61.5 186.5,68.0 C186.5,82.0 172.2,90.4 163.8,98.6 C166.1,98.4 169.1,99.2 172.3,101.6 L186.2,115.4 C187.3,116.5 191.1,115.1 191.0,115.0 Z"
-        fill="#fff"
-        class="octo-body"
-      />
-    </svg>
-  </a>
-
-  <div class="app">
-    <header class="hero">
-      <h1>OPPO 实况图制作 · 在线版</h1>
-      <p class="sub">
-        把任意视频转换成 OPPO 手机相册识别的「实况图片」（MotionPhoto）。
-        所有处理都在你的浏览器里完成，<strong>视频不会上传到任何服务器</strong>。
-      </p>
+  <div class="shell">
+    <header class="site-header">
+      <div class="header-inner">
+        <div class="brand">
+          <span class="live-badge" aria-label="实况图">
+            <span class="live-dot" aria-hidden="true" />
+            LIVE
+          </span>
+          <h1>实况图制作</h1>
+        </div>
+        <p class="tagline">
+          视频 → OPPO 相册可识别的 MotionPhoto · 支持原生 EXIF 移植 ·
+          <strong>全程本地处理</strong>
+        </p>
+      </div>
+      <a
+        class="repo-link"
+        :href="REPO_URL"
+        target="_blank"
+        rel="noopener"
+        aria-label="GitHub 仓库"
+      >
+        GitHub
+      </a>
     </header>
 
-    <section v-if="!browserHasWebCodecs" class="incompatible">
-      <div class="big-icon">⚠</div>
-      <h2>浏览器不支持 WebCodecs API</h2>
-      <p>
-        本工具依赖浏览器的硬件视频编解码能力。请使用以下任一最新版浏览器：
-      </p>
-      <ul>
-        <li><strong>Chrome / Edge</strong> 94+（推荐，支持最广泛）</li>
-        <li><strong>Safari</strong> 16.4+（macOS 13.3+ / iOS 16.4+）</li>
-        <li><strong>Firefox</strong> 130+（部分编码限制）</li>
-      </ul>
-      <p>
-        或下载
-        <a :href="REPO_URL + '/releases/latest'" target="_blank" rel="noopener">桌面版（Windows EXE）</a>
-        / 用
-        <code>pip install git+{{ REPO_URL }}.git</code>
-        在本地运行。
-      </p>
-    </section>
+    <main class="main">
+      <section v-if="!browserHasWebCodecs" class="panel alert alert-warn">
+        <strong>浏览器不支持 WebCodecs</strong>
+        <p>请使用 Chrome / Edge 94+、Safari 16.4+ 或 Firefox 130+。</p>
+      </section>
 
-    <section
-      v-else-if="!file"
-      class="dropzone"
-      :class="{ over: dragOver }"
-      @click="pickFile"
-      @dragenter.prevent="dragOver = true"
-      @dragover.prevent="dragOver = true"
-      @dragleave.prevent="dragOver = false"
-      @drop="onDrop"
-    >
-      <div class="drop-icon">📂</div>
-      <div>把视频文件拖到这里，或点击选择</div>
-      <small>支持 .mp4 / .mov / .mkv / .webm 等</small>
-    </section>
+      <section
+        v-else-if="!file"
+        class="drop-target landing-drop"
+        :class="{ over: dragOver }"
+        role="button"
+        tabindex="0"
+        @click="pickFile"
+        @keydown.enter="pickFile"
+        @dragenter.prevent="dragOver = true"
+        @dragover.prevent="dragOver = true"
+        @dragleave.prevent="dragOver = false"
+        @drop="onDrop"
+      >
+        <div class="drop-target-icon" aria-hidden="true">▷</div>
+        <div class="drop-target-title">拖入视频，或点击选择</div>
+        <div class="drop-target-hint">MP4 · MOV · MKV · WebM · 文件不会离开本机</div>
+      </section>
 
-    <section v-else class="editor">
-      <div class="row">
-        <div class="filename">{{ file.name }}</div>
-        <button class="link" @click="file = null; info = null; unsupported = null">换一个</button>
+      <div v-else class="workspace">
+        <StepIndicator :current="step" :labels="STEP_LABELS" />
+
+        <nav class="step-nav" aria-label="步骤导航">
+          <button type="button" class="btn" :disabled="step <= 1" @click="step--">
+            ← 上一步
+          </button>
+          <span class="step-label">{{ STEP_LABELS[step - 1] }}</span>
+          <button
+            type="button"
+            class="btn"
+            :disabled="step >= 4 || !!unsupported"
+            @click="step++"
+          >
+            下一步 →
+          </button>
+        </nav>
+
+        <div class="step-content">
+          <VideoStep
+            v-show="step === 1"
+            :file="file"
+            :preview-url="previewUrl"
+            :info="info"
+            :unsupported="unsupported"
+            v-model:start="start"
+            v-model:duration="duration"
+            v-model:cover-time="coverTime"
+            v-model:long-edge="longEdge"
+            v-model:audio-kbps="audioKbps"
+            @change-video="file = null; info = null; unsupported = null"
+          />
+
+          <ReferenceStep
+            v-show="step === 2"
+            :reference-file="referenceFile"
+            :reference-preview-url="referencePreviewUrl"
+            v-model:cover-mode="coverMode"
+            @pick-reference="pickReference"
+            @clear-reference="clearReference"
+          />
+
+          <MetadataEditor
+            v-show="step === 3"
+            :reference-bundle="referenceBundle"
+            v-model:edits="metadataEdits"
+            :dirty-keys="dirtyKeys"
+            @reload-from-reference="reloadMetadataFromReference"
+          />
+
+          <ExportStep
+            v-show="step === 4"
+            :status="status"
+            :status-text="statusText"
+            :error-text="errorText"
+            :progress="progress"
+            :log="log"
+            :result-url="resultUrl"
+            :result-name="resultName"
+            :result-size="resultSize"
+            :can-convert="canConvert"
+            @convert="convert"
+          />
+        </div>
       </div>
+    </main>
 
-      <div v-if="unsupported" class="unsupported">
-        <div class="big-icon">⚠</div>
-        <h3>无法处理这个视频</h3>
-        <p>{{ unsupported.reason }}<span v-if="unsupported.codec">（{{ unsupported.codec }}）</span></p>
-        <p class="hint">
-          请尝试：
-        </p>
-        <ul>
-          <li>更新 Chrome / Edge / Safari 到最新版</li>
-          <li>使用 H.264 / HEVC / VP9 等主流编码的源视频</li>
-          <li>或下载
-            <a :href="REPO_URL + '/releases/latest'" target="_blank" rel="noopener">桌面版</a>
-            处理这个文件
-          </li>
-        </ul>
-      </div>
-
-      <template v-else>
-        <video
-          ref="videoEl"
-          :src="previewUrl"
-          controls
-          class="preview"
-        />
-
-        <div class="row pos">
-          <span>{{ positionLabel }}</span>
-          <div class="actions">
-            <button @click="setStartFromCurrent">此处设为起点</button>
-            <button @click="setCoverFromCurrent">此处设为封面</button>
-          </div>
-        </div>
-
-        <div class="form">
-          <label>
-            片段起点
-            <input type="number" step="0.1" min="0" v-model.number="start" />
-            <span class="unit">秒</span>
-          </label>
-          <label>
-            片段时长
-            <input type="number" step="0.1" min="0.5" max="10" v-model.number="duration" />
-            <span class="unit">秒</span>
-          </label>
-          <label>
-            封面位置
-            <input type="number" step="0.1" min="0" v-model.number="coverTime" />
-            <span class="unit">秒</span>
-          </label>
-        </div>
-
-        <details class="adv" :open="showAdvanced">
-          <summary @click="showAdvanced = !showAdvanced">高级参数</summary>
-          <div class="form">
-            <label>
-              输出长边
-              <input type="number" min="360" max="4096" step="40" v-model.number="longEdge" />
-              <span class="unit">像素</span>
-            </label>
-            <label>
-              音频码率
-              <input type="number" min="64" max="320" step="32" v-model.number="audioKbps" />
-              <span class="unit">kbps</span>
-            </label>
-          </div>
-        </details>
-
-        <button
-          class="primary"
-          :disabled="status === 'running'"
-          @click="convert"
-        >
-          {{ status === "running" ? "处理中…" : "开始转换" }}
-        </button>
-
-        <div v-if="status !== 'idle'" class="progress-block">
-          <div class="status-line">
-            <span v-if="status === 'running'" class="spinner" />
-            <span>{{ statusText }}</span>
-          </div>
-          <div v-if="status === 'running'" class="bar">
-            <div class="bar-fill" :style="{ width: `${Math.min(100, progress * 100)}%` }" />
-          </div>
-          <div v-if="errorText" class="error">{{ errorText }}</div>
-          <details v-if="log.length" class="log-panel" :open="status === 'running'">
-            <summary>调试日志（{{ log.length }} 行）</summary>
-            <pre ref="logEl" class="log-body">{{ log.slice(-80).join("\n") }}</pre>
-          </details>
-        </div>
-
-        <div v-if="resultUrl" class="result">
-          <a :href="resultUrl" :download="resultName" class="primary download">
-            ⬇ 下载 {{ resultName }}（{{ (resultSize / 1024 / 1024).toFixed(2) }} MB）
-          </a>
-          <p class="tip">
-            下载后通过 <strong>USB / OPPO 互传 / 微信原图</strong> 传到手机，放进
-            <code>DCIM/Camera/</code> 目录让相册识别。
-            <strong>不要</strong>用普通微信图片或 QQ 图片传输 —— 它们会剥光元数据。
-          </p>
-        </div>
-      </template>
-    </section>
-
-    <footer>
-      <a :href="REPO_URL" target="_blank" rel="noopener">GitHub · Young-Spark/oppo-live-photo-maker</a>
-      ·
-      <span>开源 MIT · 未与 OPPO 官方关联</span>
+    <footer class="site-footer">
+      <span>MIT · <a :href="AUTHOR_URL" target="_blank" rel="noopener">chaseZ</a> · 未与 OPPO 官方关联</span>
+      <a :href="REPO_URL" target="_blank" rel="noopener">oppo-live-photo-maker</a>
     </footer>
   </div>
 </template>
 
 <style scoped>
-.github-corner {
-  position: fixed;
-  top: 0;
-  right: 0;
-  z-index: 100;
-  display: block;
-  width: 64px;
-  height: 64px;
-  border: 0;
-  text-decoration: none;
-}
-.github-corner:hover .octo-arm {
-  animation: octocat-wave 0.56s ease-in-out;
-}
-@keyframes octocat-wave {
-  0%, 100% { transform: rotate(0); }
-  20%, 60% { transform: rotate(-25deg); }
-  40%, 80% { transform: rotate(10deg); }
-}
-.github-corner .octo-arm {
-  transform-origin: 130px 106px;
-}
-.app {
-  max-width: 760px;
+.shell {
+  max-width: 880px;
   margin: 0 auto;
-  padding: 24px 20px 64px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Microsoft YaHei", sans-serif;
-  color: #1a1a1a;
-}
-.hero h1 {
-  margin: 0 0 8px;
-  font-size: 26px;
-}
-.hero .sub {
-  color: #555;
-  line-height: 1.55;
-  margin: 0;
-}
-.incompatible {
-  margin-top: 28px;
-  padding: 32px 24px;
-  background: #fff7e6;
-  border: 1px solid #ffd591;
-  border-radius: 10px;
-  text-align: center;
-}
-.incompatible h2 {
-  margin: 12px 0 16px;
-  color: #d46b08;
-}
-.incompatible p,
-.incompatible ul {
-  text-align: left;
-  max-width: 480px;
-  margin: 0 auto 12px;
-  color: #555;
-  line-height: 1.7;
-}
-.incompatible code {
-  background: #f5f5f5;
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-size: 13px;
-}
-.incompatible a {
-  color: #1677ff;
-}
-.big-icon {
-  font-size: 48px;
-}
-.unsupported {
-  padding: 24px;
-  background: #fff7e6;
-  border: 1px solid #ffd591;
-  border-radius: 10px;
-  text-align: center;
-}
-.unsupported h3 {
-  margin: 8px 0 12px;
-  color: #d46b08;
-}
-.unsupported p,
-.unsupported ul {
-  text-align: left;
-  max-width: 420px;
-  margin: 0 auto 8px;
-  color: #555;
-}
-.unsupported .hint {
-  margin-top: 12px;
-  font-size: 13px;
-}
-.unsupported a {
-  color: #1677ff;
-}
-.dropzone {
-  margin-top: 28px;
-  padding: 56px 20px;
-  border: 2px dashed #c4c4c4;
-  border-radius: 12px;
-  text-align: center;
-  cursor: pointer;
-  transition: 0.15s;
-  background: #fafafa;
-}
-.dropzone:hover,
-.dropzone.over {
-  border-color: #1677ff;
-  background: #e6f4ff;
-}
-.drop-icon {
-  font-size: 36px;
-  margin-bottom: 8px;
-}
-.dropzone small {
-  display: block;
-  margin-top: 6px;
-  color: #888;
-}
-.editor {
-  margin-top: 20px;
+  padding: 32px 20px 48px;
+  min-height: 100vh;
   display: flex;
   flex-direction: column;
-  gap: 16px;
 }
-.row {
+
+.site-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 36px;
+}
+.header-inner {
+  flex: 1;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+.brand h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(26px, 5vw, 34px);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+}
+.tagline {
+  margin: 0;
+  max-width: 520px;
+  font-size: 14px;
+  color: var(--text-soft);
+  line-height: 1.65;
+}
+.tagline strong {
+  color: var(--live);
+  font-weight: 500;
+}
+.repo-link {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--text-soft);
+  text-decoration: none;
+  transition: border-color var(--transition), color var(--transition);
+}
+.repo-link:hover {
+  border-color: var(--text-faint);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.main {
+  flex: 1;
+}
+.landing-drop {
+  margin-top: 12px;
+}
+
+.workspace {
+  animation: fade-up 0.35s ease;
+}
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.step-nav {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  margin-bottom: 20px;
 }
-.filename {
-  font-weight: 500;
-  word-break: break-all;
-}
-.link {
-  background: transparent;
-  border: none;
-  color: #1677ff;
-  cursor: pointer;
-  font-size: 14px;
-}
-.preview {
-  width: 100%;
-  max-height: 380px;
-  background: #000;
-  border-radius: 8px;
-}
-.pos {
-  font-size: 13px;
-  color: #666;
-}
-.actions {
-  display: flex;
-  gap: 8px;
-}
-button {
-  padding: 6px 12px;
-  border: 1px solid #d9d9d9;
-  background: #fff;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 14px;
-}
-button:hover:not(:disabled) {
-  border-color: #1677ff;
-  color: #1677ff;
-}
-.form {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 12px;
-}
-.form label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 13px;
-  color: #555;
-}
-.form input {
-  padding: 7px 10px;
-  border: 1px solid #d9d9d9;
-  border-radius: 5px;
-  font-size: 14px;
-}
-.form input:focus {
-  outline: none;
-  border-color: #1677ff;
-}
-.unit {
-  font-size: 12px;
-  color: #888;
-}
-.adv summary {
-  cursor: pointer;
-  color: #555;
-  user-select: none;
-  padding: 4px 0;
-}
-.adv > .form {
-  margin-top: 10px;
-}
-.primary {
-  padding: 12px 18px;
-  background: #1677ff;
-  color: #fff;
-  border: none;
-  border-radius: 6px;
+.step-label {
+  font-family: var(--font-display);
   font-size: 15px;
-  font-weight: 500;
-  cursor: pointer;
+  color: var(--text-soft);
 }
-.primary:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+
+.step-content {
+  min-height: 320px;
 }
-.primary:hover:not(:disabled) {
-  background: #4096ff;
-  color: #fff;
-}
-.progress-block {
+
+.site-footer {
+  margin-top: 48px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.status-line {
-  display: flex;
+  justify-content: space-between;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: #444;
-}
-.spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid #d9d9d9;
-  border-top-color: #1677ff;
-  border-radius: 50%;
-  animation: spin 0.7s linear infinite;
-  flex-shrink: 0;
-}
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-.bar {
-  height: 6px;
-  background: #eee;
-  border-radius: 3px;
-  overflow: hidden;
-}
-.bar-fill {
-  height: 100%;
-  background: #1677ff;
-  transition: 0.2s;
-}
-.error {
-  padding: 10px 12px;
-  background: #fff1f0;
-  border-left: 3px solid #ff4d4f;
-  border-radius: 4px;
-  font-size: 13px;
-  white-space: pre-wrap;
-}
-.log-panel summary {
-  cursor: pointer;
-  font-size: 12px;
-  color: #888;
-}
-.log-body {
-  margin: 6px 0 0;
-  padding: 8px 10px;
-  max-height: 220px;
-  overflow: auto;
-  background: #1e1e1e;
-  color: #d4d4d4;
-  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
-  font-size: 11px;
-  line-height: 1.5;
-  border-radius: 4px;
-  white-space: pre;
-}
-.result {
-  padding: 16px;
-  background: #f6ffed;
-  border: 1px solid #b7eb8f;
-  border-radius: 8px;
-  display: flex;
-  flex-direction: column;
   gap: 12px;
-}
-.download {
-  display: inline-block;
-  text-align: center;
-  text-decoration: none;
-}
-.tip {
-  margin: 0;
-  font-size: 13px;
-  color: #555;
-  line-height: 1.6;
-}
-.tip code {
-  padding: 1px 5px;
-  background: #f5f5f5;
-  border-radius: 3px;
-}
-footer {
-  margin-top: 60px;
-  text-align: center;
+  flex-wrap: wrap;
   font-size: 12px;
-  color: #888;
+  color: var(--text-faint);
 }
-footer a {
-  color: #888;
+.site-footer a {
+  color: var(--text-faint);
+}
+.site-footer a:hover {
+  color: var(--live);
+}
+
+@media (max-width: 520px) {
+  .site-header {
+    flex-direction: column;
+  }
+  .repo-link {
+    align-self: flex-start;
+  }
 }
 </style>

@@ -19,6 +19,10 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .metadata import NativeMetadataBundle
 
 EXIFTOOL_CONFIG_NAME = "exiftool_oppo.config"
 
@@ -150,6 +154,8 @@ def write_oppo_motionphoto(
     output_path: str | Path,
     *,
     presentation_timestamp_us: int = 0,
+    reference_jpg: str | Path | None = None,
+    metadata_overrides: NativeMetadataBundle | None = None,
 ) -> Path:
     """Produce an OPPO MotionPhoto JPEG.
 
@@ -163,6 +169,8 @@ def write_oppo_motionphoto(
     Returns:
         Path to the written file.
     """
+    from .metadata import apply_native_metadata
+
     cover_jpg = Path(cover_jpg)
     video_mp4 = Path(video_mp4)
     output_path = Path(output_path)
@@ -183,6 +191,13 @@ def write_oppo_motionphoto(
         work_jpg = Path(td) / "work.jpg"
         shutil.copyfile(cover_jpg, work_jpg)
 
+        if reference_jpg is not None or metadata_overrides is not None:
+            apply_native_metadata(
+                work_jpg,
+                reference_jpg,
+                metadata_overrides,
+            )
+
         # Single exiftool invocation: strip-then-inject in one process call.
         _run(
             [
@@ -191,10 +206,14 @@ def write_oppo_motionphoto(
                 "-XMP:all=", "-MPF:all=", "-Trailer:all=",
                 # 2. Inject EXIF + XMP metadata expected by OPPO Photos.
                 "-EXIF:UserComment=Oplus_8388608",
-                # XMP - GCamera (Google MotionPhoto core)
+                # XMP - GCamera (Google MotionPhoto core + legacy MicroVideo)
                 "-XMP-GCamera:MotionPhoto=1",
                 "-XMP-GCamera:MotionPhotoVersion=1",
                 f"-XMP-GCamera:MotionPhotoPresentationTimestampUs={ts}",
+                "-XMP-GCamera:MicroVideo=1",
+                "-XMP-GCamera:MicroVideoVersion=1",
+                f"-XMP-GCamera:MicroVideoOffset={video_size}",
+                f"-XMP-GCamera:MicroVideoPresentationTimestampUs={ts}",
                 # XMP - OpCamera (OPPO private)
                 f"-XMP-OpCamera:MotionPhotoPrimaryPresentationTimestampUs={ts}",
                 "-XMP-OpCamera:MotionPhotoOwner=oplus",

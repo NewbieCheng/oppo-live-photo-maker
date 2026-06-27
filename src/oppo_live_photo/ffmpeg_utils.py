@@ -147,6 +147,33 @@ def extract_cover(
     return out
 
 
+def prepare_reference_cover(
+    reference_jpg: str | Path,
+    out_jpg: str | Path,
+    *,
+    target_long_edge: int = 1920,
+    quality: int = 2,
+) -> Path:
+    """Scale a reference JPEG for use as the MotionPhoto still cover."""
+    ffmpeg = _find("ffmpeg")
+    out = Path(out_jpg)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    scale = (
+        f"scale='if(gt(iw,ih),{target_long_edge},-2)':'"
+        f"if(gt(iw,ih),-2,{target_long_edge})'"
+    )
+    _run(
+        [
+            ffmpeg, "-y",
+            "-i", str(reference_jpg),
+            "-vf", scale,
+            "-q:v", str(quality),
+            str(out),
+        ]
+    )
+    return out
+
+
 def transcode_clip(
     video: str | Path,
     out_mp4: str | Path,
