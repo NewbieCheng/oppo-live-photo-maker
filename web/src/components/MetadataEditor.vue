@@ -10,6 +10,7 @@ const props = defineProps<{
   referenceBundle: NativeMetadataBundle | null;
   edits: NativeMetadataBundle;
   dirtyKeys: Set<string>;
+  compact?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -80,21 +81,22 @@ const presentationUs = computed({
 </script>
 
 <template>
-  <section class="panel meta-step">
+  <section class="meta-step" :class="{ panel: !compact, compact }">
     <div class="head">
-      <div>
+      <div v-if="!compact">
         <p class="panel-title">原生数据</p>
         <p class="panel-desc" style="margin-bottom: 0">
           编辑后将写入输出 JPEG。标黄字段表示已修改。
         </p>
       </div>
+      <p v-else class="compact-title">源图元数据字段</p>
       <button
         type="button"
         class="btn"
         :disabled="!referenceBundle"
         @click="emit('reloadFromReference')"
       >
-        从参考图加载
+        {{ compact ? "从源图重新加载" : "从参考图加载" }}
       </button>
     </div>
 
@@ -182,6 +184,15 @@ const presentationUs = computed({
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+.meta-step.compact {
+  gap: 12px;
+}
+.compact-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-soft);
 }
 .head {
   display: flex;

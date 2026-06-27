@@ -67,6 +67,7 @@ class ConvertParams(TypedDict, total=False):
     preset: str
     reference_image: str
     cover_mode: str
+    video_mode: str
     metadata_overrides: metadata.NativeMetadataBundle
     presentation_timestamp_us: int
 
@@ -85,6 +86,7 @@ class ConvertWorker(QtCore.QObject):
         self.output = output
         self.params = params
         self._cancel = False
+        self._result_detail: dict[str, float | int] = {}
 
     def cancel(self) -> None:
         self._cancel = True
@@ -103,39 +105,48 @@ class ConvertWorker(QtCore.QObject):
                 except Exception:
                     info = None
 
+                rotation = info.rotation if info else 0
+
                 if self._cancel:
                     raise RuntimeError("已取消")
 
                 reference = Path(p["reference_image"]) if p.get("reference_image") else None
-                cover_mode = p.get("cover_mode", "video")
+                cover_mode = p.get("cover_mode", "reference")
+                video_mode = p.get("video_mode", "full")
 
                 if cover_mode == "reference" and reference is not None:
-                    self.progress.emit("正在准备参考图封面...")
-                    ffmpeg_utils.prepare_reference_cover(
-                        reference, cover,
-                        target_long_edge=p["long_edge"],
-                    )
+                    self.progress.emit("正在导出参考图封面（live-photo-conv）...")
+                    ffmpeg_utils.export_main_image(reference, cover)
                 else:
                     self.progress.emit("正在抽取封面帧...")
                     ffmpeg_utils.extract_cover(
                         self.video, cover,
                         timestamp=p["cover_time"],
                         target_long_edge=p["long_edge"],
+                        rotation=rotation,
                     )
                 if self._cancel:
                     raise RuntimeError("已取消")
 
-                self.progress.emit("正在编码视频片段...")
-                ffmpeg_utils.transcode_clip(
-                    self.video, clip,
-                    start=p["start"],
-                    duration=p["duration"],
-                    target_long_edge=p["long_edge"],
-                    crf=p["crf"],
-                    audio_bitrate_k=p.get("audio_kbps", 128),
-                    preset=p.get("preset", "fast"),
-                    has_audio=(info.has_audio if info else None),
-                )
+                if video_mode == "full":
+                    self.progress.emit("正在嵌入原视频（流复制）...")
+                    ffmpeg_utils.prepare_video_for_mux(
+                        self.video, clip, mode="full", start=p["start"],
+                    )
+                else:
+                    self.progress.emit("正在编码视频片段...")
+                    ffmpeg_utils.prepare_video_for_mux(
+                        self.video, clip,
+                        mode="clip",
+                        start=p["start"],
+                        duration=p["duration"],
+                        target_long_edge=p["long_edge"],
+                        crf=p["crf"],
+                        audio_bitrate_k=p.get("audio_kbps", 128),
+                        preset=p.get("preset", "fast"),
+                        has_audio=(info.has_audio if info else None),
+                        rotation=rotation,
+                    )
                 if self._cancel:
                     raise RuntimeError("已取消")
 
@@ -147,7 +158,33 @@ class ConvertWorker(QtCore.QObject):
                     presentation_timestamp_us=p.get("presentation_timestamp_us", 0),
                     reference_jpg=reference,
                     metadata_overrides=p.get("metadata_overrides"),
+                    cover_mode=cover_mode,
                 )
+                clip_bytes = clip.stat().st_size if clip.is_file() else 0
+                # #region agent log
+                metadata._agent_debug(
+                    "M2",
+                    "gui.py:ConvertWorker.run",
+                    "mux complete",
+                    {
+                        "output": str(self.output),
+                        "size": self.output.stat().st_size if self.output.is_file() else 0,
+                        "clipBytes": clip_bytes,
+                        "clipDuration": p.get("duration"),
+                        "videoMode": video_mode,
+                        "coverMode": cover_mode,
+                        "presentationTsUs": p.get("presentation_timestamp_us", 0),
+                        "clipStart": p["start"],
+                        "rotation": rotation,
+                        "hasReference": reference is not None,
+                    },
+                )
+                # #endregion
+                self._result_detail = {
+                    "clip_bytes": clip_bytes,
+                    "clip_duration": p.get("duration", 0),
+                    "video_mode": video_mode,
+                }
             self.finished.emit(self.output)
         except Exception as e:
             tb = traceback.format_exc()
@@ -530,11 +567,11 @@ class SingleTab(QtWidgets.QWidget):
             "视频帧", "从预览中截取静态封面", "video"
         )
         self.mode_ref_image = self._make_mode_option(
-            "参考图", "使用上传图片作为封面像素", "reference"
+            "参考图", "原图像素 + copy-img-meta（live-photo-conv 推荐）", "reference"
         )
         self.radio_cover_video = self.mode_video_frame.findChild(QtWidgets.QRadioButton)
         self.radio_cover_ref = self.mode_ref_image.findChild(QtWidgets.QRadioButton)
-        self.radio_cover_video.setChecked(True)
+        self.radio_cover_ref.setChecked(True)
         self.cover_mode_group.addButton(self.radio_cover_video)
         self.cover_mode_group.addButton(self.radio_cover_ref)
         self.radio_cover_ref.toggled.connect(self._update_export_state)
@@ -641,6 +678,8 @@ class SingleTab(QtWidgets.QWidget):
         self.audio_out.setVolume(0.5)
         self.player.positionChanged.connect(self._on_position)
         self.player.durationChanged.connect(self._on_duration)
+        self.player.errorOccurred.connect(self._on_player_error)
+        self.player.mediaStatusChanged.connect(self._on_media_status)
 
         params_wrap = QtWidgets.QWidget()
         params_layout = QtWidgets.QVBoxLayout(params_wrap)
@@ -687,6 +726,26 @@ class SingleTab(QtWidgets.QWidget):
         self.spin_cover.valueChanged.connect(self._mark_cover_user_set)
         params_layout.addLayout(form_grid)
 
+        embed_legend = QtWidgets.QLabel("视频嵌入")
+        embed_legend.setObjectName("fieldLabel")
+        params_layout.addWidget(embed_legend)
+        self.video_mode_group = QtWidgets.QButtonGroup(self)
+        self.mode_video_full = self._make_mode_option(
+            "原视频", "流复制原编码（≤3s 整段，更长取前 3s）", "full"
+        )
+        self.mode_video_clip = self._make_mode_option(
+            "重编码片段", "截取并转码短 MP4", "clip"
+        )
+        self.radio_video_full = self.mode_video_full.findChild(QtWidgets.QRadioButton)
+        self.radio_video_clip = self.mode_video_clip.findChild(QtWidgets.QRadioButton)
+        self.radio_video_full.setChecked(True)
+        self.video_mode_group.addButton(self.radio_video_full)
+        self.video_mode_group.addButton(self.radio_video_clip)
+        self.radio_video_full.toggled.connect(self._sync_video_mode_ui)
+        self.radio_video_clip.toggled.connect(self._sync_video_mode_ui)
+        params_layout.addWidget(self.mode_video_full)
+        params_layout.addWidget(self.mode_video_clip)
+
         self.adv_box = QtWidgets.QGroupBox("编码参数")
         self.adv_box.setCheckable(True)
         self.adv_box.setChecked(False)
@@ -720,6 +779,7 @@ class SingleTab(QtWidgets.QWidget):
 
         outer.addWidget(frame)
         self.stack.addWidget(_wrap_scroll(page))
+        self._sync_video_mode_ui()
 
     def _labeled_spin(
         self,
@@ -977,6 +1037,21 @@ class SingleTab(QtWidgets.QWidget):
         self.ref_name.setText(path.name)
         self._populate_meta_fields(bundle)
         self._update_ref_chips(path, bundle)
+        # #region agent log
+        from . import metadata as _metadata_mod
+
+        _metadata_mod._agent_debug(
+            "D",
+            "gui.py:load_reference",
+            "GUI loaded reference bundle",
+            {
+                "path": str(path),
+                "exifCount": len(bundle.exif),
+                "iptcCount": len(bundle.iptc),
+                "exifKeys": list(bundle.exif.keys())[:20],
+            },
+        )
+        # #endregion
         pix = QtGui.QPixmap(str(path))
         if not pix.isNull():
             self.ref_thumb.setPixmap(
@@ -984,7 +1059,18 @@ class SingleTab(QtWidgets.QWidget):
             )
         else:
             self.ref_thumb.setText("预览")
+        self.radio_cover_ref.setChecked(True)
+        self._sync_mode_frame(self.mode_ref_image, True)
+        self._sync_mode_frame(self.mode_video_frame, False)
         self._update_export_state()
+
+    def _sync_video_mode_ui(self, _checked: bool = False) -> None:
+        clip_mode = self.radio_video_clip.isChecked()
+        for spin in (self.spin_start, self.spin_duration, self.spin_cover):
+            spin.setEnabled(clip_mode)
+        self.adv_box.setEnabled(clip_mode)
+        if not clip_mode and self.video_info:
+            self.spin_duration.setValue(min(10.0, self.video_info.duration))
 
     def _update_ref_chips(
         self, path: Path, bundle: metadata.NativeMetadataBundle
@@ -1046,25 +1132,80 @@ class SingleTab(QtWidgets.QWidget):
         self.video_drop.setVisible(False)
         self.video_content.setVisible(True)
         self.lbl_filename.setText(path.name)
-        self.lbl_meta_line.setText(
-            f"{info.display_width}×{info.display_height} · "
-            f"{info.codec.upper() if info.codec else '?'}"
+        try:
+            self.lbl_meta_line.setText(
+                f"{info.display_width}×{info.display_height} · "
+                f"{info.codec.upper() if info.codec else '?'}"
+            )
+            self.player.setSource(QUrl.fromLocalFile(str(path.resolve())))
+            self.spin_start.setRange(0.0, max(0.0, info.duration - 0.5))
+            self.spin_cover.setRange(0.0, max(0.0, info.duration))
+            self.spin_start.setValue(0.0)
+            self.spin_cover.setValue(0.0)
+            self.spin_duration.setMaximum(min(10.0, info.duration))
+            if info.duration < 3.0:
+                self.spin_duration.setValue(max(0.5, info.duration))
+            else:
+                self.spin_duration.setValue(3.0)
+            self.radio_video_full.setChecked(True)
+            self.export_status.setText(
+                f"已加载 {path.name}（{info.display_width}×{info.display_height}，"
+                f"{info.duration:.2f} 秒）"
+            )
+            self._update_export_state()
+            self._sync_video_mode_ui()
+            # #region agent log
+            from . import metadata as _metadata_mod
+
+            _metadata_mod._agent_debug(
+                "V1",
+                "gui.py:load_video",
+                "video loaded",
+                {
+                    "path": str(path),
+                    "duration": info.duration,
+                    "codec": info.codec,
+                    "playerDurationMs": self.player.duration(),
+                },
+            )
+            # #endregion
+        except Exception as e:
+            # #region agent log
+            from . import metadata as _metadata_mod
+
+            _metadata_mod._agent_debug(
+                "V1",
+                "gui.py:load_video",
+                "load_video failed after probe",
+                {"path": str(path), "error": str(e)},
+            )
+            # #endregion
+            QtWidgets.QMessageBox.critical(self, "加载视频预览失败", str(e))
+            self._change_video()
+
+    def _on_player_error(self, error: QMediaPlayer.Error, message: str = "") -> None:
+        if error == QMediaPlayer.NoError:
+            return
+        hint = message or str(error)
+        if self.video_info and self.video_info.codec in ("hevc", "h265"):
+            hint += "\n\nHEVC/H.265 在部分 Windows 预览中不可用，但仍可用 ffmpeg 转码导出实况图。"
+        self.export_status.setText(f"预览播放失败：{hint}")
+        # #region agent log
+        from . import metadata as _metadata_mod
+
+        _metadata_mod._agent_debug(
+            "V2",
+            "gui.py:_on_player_error",
+            "QMediaPlayer error",
+            {"error": int(error), "message": message, "codec": getattr(self.video_info, "codec", "")},
         )
-        self.player.setSource(QUrl.fromLocalFile(str(path)))
-        self.spin_start.setRange(0.0, max(0.0, info.duration - 0.5))
-        self.spin_cover.setRange(0.0, max(0.0, info.duration))
-        self.spin_start.setValue(0.0)
-        self.spin_cover.setValue(0.0)
-        self.spin_duration.setMaximum(min(10.0, info.duration))
-        if info.duration < 3.0:
-            self.spin_duration.setValue(max(0.5, info.duration))
-        else:
-            self.spin_duration.setValue(3.0)
-        self.export_status.setText(
-            f"已加载 {path.name}（{info.display_width}×{info.display_height}，"
-            f"{info.duration:.2f} 秒）"
-        )
-        self._update_export_state()
+        # #endregion
+
+    def _on_media_status(self, status: QMediaPlayer.MediaStatus) -> None:
+        if status == QMediaPlayer.InvalidMedia:
+            self.export_status.setText(
+                "无法预览此视频编码；片段参数已就绪，可直接导出（转码由 ffmpeg 处理）。"
+            )
 
     def _change_video(self) -> None:
         self.player.stop()
@@ -1251,6 +1392,7 @@ class SingleTab(QtWidgets.QWidget):
             "crf": self.spin_crf.value(),
             "audio_kbps": self.spin_audio.value(),
             "cover_mode": cover_mode,
+            "video_mode": "clip" if self.radio_video_clip.isChecked() else "full",
             "presentation_timestamp_us": presentation_ts,
             "metadata_overrides": meta_for_mux,
         }
@@ -1294,12 +1436,33 @@ class SingleTab(QtWidgets.QWidget):
         self.btn_convert.setText("开始转换")
         self.export_progress.setRange(0, 1)
         self.export_progress.setValue(1)
-        size_mb = out.stat().st_size / (1024 * 1024)
+        total_bytes = out.stat().st_size
+        size_mb = total_bytes / (1024 * 1024)
+        detail = getattr(self.worker, "_result_detail", {}) if self.worker else {}
+        clip_bytes = int(detail.get("clip_bytes", 0))
+        clip_dur = float(detail.get("clip_duration", 0))
+        video_mode = str(detail.get("video_mode", "full"))
+        jpeg_kb = max(0, (total_bytes - clip_bytes) // 1024)
+        clip_kb = clip_bytes // 1024
+        if video_mode == "full":
+            breakdown = f"封面 JPEG ≈ {jpeg_kb} KB + 原视频 ≈ {clip_kb} KB"
+        else:
+            breakdown = (
+                f"封面 JPEG ≈ {jpeg_kb} KB + 视频片段 {clip_dur:.1f}s ≈ {clip_kb} KB"
+                if clip_bytes
+                else "（未记录片段大小）"
+            )
         self.export_status.setText(f"完成 · {size_mb:.2f} MB → {out}")
         self._update_nav()
         self._update_export_state()
         QtWidgets.QMessageBox.information(
-            self, "成功", f"实况图已保存：\n{out}\n大小：{size_mb:.2f} MB"
+            self,
+            "成功",
+            f"实况图已保存：\n{out}\n"
+            f"总大小：{size_mb:.2f} MB\n"
+            f"{breakdown}\n\n"
+            f"流程：live-photo-conv 式原图封面 + copy-img-meta + 原视频 append，"
+            f"并注入 OPPO MotionPhoto/MPF 标签。",
         )
 
     def _on_fail(self, msg: str) -> None:
@@ -1469,6 +1632,8 @@ class BatchTab(QtWidgets.QWidget):
             "long_edge": self.spin_long.value(),
             "crf": self.spin_crf.value(),
             "audio_kbps": 128,
+            "cover_mode": "video",
+            "video_mode": "full",
         }
         self.status.setText(
             f"[{self.current_index+1}/{len(self.queue)}] {video.name} ..."

@@ -7,7 +7,10 @@ import {
   type ReferenceImageFormat,
 } from "./imageFormat";
 import { buildSyntheticReferenceJpeg } from "./apply";
-import { bundleHasEditableFields, parseFromTagMap, type ParseSummary } from "./parse";
+import { emptyBundle } from "./fields";
+import { bundleHasEditableFields, parseFullMetadataBundle, type ParseSummary } from "./parse";
+import { extractMetadataSegments } from "./segments";
+import { extractRawXmpPackets } from "./xmp";
 import type { NativeMetadataBundle } from "./types";
 
 export interface LoadedReferenceImage {
@@ -31,7 +34,7 @@ function toUint8Array(buf: ArrayBuffer): Uint8Array {
 
 async function tryParseBytes(bytes: Uint8Array): Promise<NativeMetadataBundle | null> {
   try {
-    return parseFromTagMap(bytes);
+    return parseFullMetadataBundle(bytes);
   } catch {
     return null;
   }
@@ -59,12 +62,19 @@ export async function loadReferenceImageFile(file: File): Promise<LoadedReferenc
   }
 
   if (!bundle || !bundleHasEditableFields(bundle)) {
-    throw new Error(
-      `${formatLabel(format)} 中未找到可读取的 EXIF/IPTC 元数据。` +
-        (isHeicFamily(format)
-          ? " HEIC 在浏览器内只能移植已解析的字段（非 exiftool 级全量复制）；请确认是机内直出原图，或使用桌面版 + exiftool。"
-          : " 请换一张机内直出的原图试试。"),
-    );
+    const hasJpegSegments =
+      isJpegFormat(format) && extractMetadataSegments(originalBytes).length > 0;
+    const hasRawXmp = extractRawXmpPackets(originalBytes).length > 0;
+    if (hasJpegSegments || hasRawXmp) {
+      bundle = bundle ?? emptyBundle();
+    } else {
+      throw new Error(
+        `${formatLabel(format)} 中未找到可读取的 EXIF/IPTC/XMP 元数据。` +
+          (isHeicFamily(format)
+            ? " 请确认是机内直出原图，或使用桌面版 + exiftool 做全量二进制复制。"
+            : " 请换一张机内直出的原图试试。"),
+      );
+    }
   }
 
   const previewBlob = jpegBytes

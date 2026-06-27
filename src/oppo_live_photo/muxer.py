@@ -169,6 +169,7 @@ def write_oppo_motionphoto(
     presentation_timestamp_us: int = 0,
     reference_jpg: str | Path | None = None,
     metadata_overrides: NativeMetadataBundle | None = None,
+    cover_mode: str = "video",
 ) -> Path:
     """Produce an OPPO MotionPhoto JPEG.
 
@@ -196,7 +197,7 @@ def write_oppo_motionphoto(
     exiftool = _find_exiftool()
     config = _config_path()
     video_size = video_mp4.stat().st_size
-    ts = int(presentation_timestamp_us)
+    ts = max(0, int(presentation_timestamp_us))
 
     # Use a private temp dir so concurrent jobs writing to the same output
     # directory cannot clash on a sidecar JPEG.
@@ -209,6 +210,7 @@ def write_oppo_motionphoto(
                 work_jpg,
                 reference_jpg,
                 metadata_overrides,
+                preserve_orientation=(cover_mode == "reference"),
             )
 
         # Single exiftool invocation: strip-then-inject in one process call.
@@ -260,4 +262,74 @@ def write_oppo_motionphoto(
         fo.write(new_jpeg)
         fo.write(video_mp4.read_bytes())
 
+    # #region agent log
+    from .metadata import _agent_debug
+
+    from .metadata import _read_orientation_numeric
+
+    _agent_debug(
+        "M3",
+        "muxer.py:write_oppo_motionphoto",
+        "motion photo written",
+        {
+            "output": str(output_path),
+            "jpegBytes": len(new_jpeg),
+            "mp4Bytes": video_size,
+            "totalBytes": output_path.stat().st_size,
+            "microVideoOffset": video_size,
+            "presentationTsUs": ts,
+            "hasReference": reference_jpg is not None,
+            "orientation": _read_orientation_numeric(output_path),
+            "hasMpf": b"MPF\x00" in new_jpeg,
+            "hasMotionXmp": b"GCamera:MotionPhoto" in new_jpeg,
+        },
+    )
+    # #endregion
+
     return output_path
+
+
+def rebuild_motionphoto_xmp_in_jpeg(
+    jpeg_path: str | Path,
+    *,
+    video_length: int,
+    presentation_timestamp_us: int = 0,
+) -> Path:
+    """Re-write MotionPhoto XMP/MPF on an existing JPEG (keep EXIF/IPTC).
+
+    Used after ``copy_img_meta`` on live.jpg so VideoLength matches appended MP4.
+    """
+    jpeg_path = Path(jpeg_path)
+    if not jpeg_path.is_file():
+        raise FileNotFoundError(jpeg_path)
+
+    exiftool = _find_exiftool()
+    config = _config_path()
+    video_size = max(0, int(video_length))
+    ts = max(0, int(presentation_timestamp_us))
+
+    _run(
+        [
+            exiftool,
+            "-config",
+            config,
+            "-overwrite_original",
+            "-XMP:all=",
+            "-MPF:all=",
+            "-Trailer:all=",
+            "-XMP-GCamera:MotionPhoto=1",
+            "-XMP-GCamera:MotionPhotoVersion=1",
+            f"-XMP-GCamera:MotionPhotoPresentationTimestampUs={-1 if ts == 0 else ts}",
+            "-XMP-GCamera:MicroVideo=1",
+            "-XMP-GCamera:MicroVideoVersion=1",
+            f"-XMP-GCamera:MicroVideoOffset={video_size}",
+            f"-XMP-GCamera:MicroVideoPresentationTimestampUs={-1 if ts == 0 else ts}",
+            "-XMP-Container:Directory+={Item={Mime=image/jpeg,"
+            "Semantic=Primary,Length=0,Padding=0}}",
+            f"-XMP-Container:Directory+={{Item={{Mime=video/mp4,"
+            f"Semantic=MotionPhoto,Length={video_size},Padding=0}}}}",
+            str(jpeg_path),
+        ]
+    )
+
+    return jpeg_path

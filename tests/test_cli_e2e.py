@@ -42,6 +42,7 @@ def test_cli_produces_valid_live_photo(tmp_path):
         [
             str(src),
             "-o", str(out),
+            "--video-mode", "clip",
             "--start", "0",
             "--duration", "1.5",
             "--long-edge", "320",

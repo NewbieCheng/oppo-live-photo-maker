@@ -105,9 +105,25 @@ python main.py
 - EXIF `UserComment` 始终强制为 `Oplus_8388608`（OPPO 识别必需）
 - 同时写入 Google MotionPhoto 与 MicroVideo（旧标准）XMP 标签
 
-**在线版**：步骤 2「参考图」→ 步骤 3「原生数据」中上传、编辑。
+**网页版 HEIC 说明**：功能二提供两种复制引擎：
 
-**网页版 HEIC 说明**：浏览器无法运行 exiftool，HEIC 参考图会先解析可见字段（Make/Model/GPS 等），再合成 JPEG EXIF 段写入输出；**无法**像桌面版 `copy-img-meta --exclude-xmp` 那样 100% 复制 MakerNote、ICC 等全部二进制块。机内 JPG 参考图可走完整 APP1 段移植。需要全量元数据时请用桌面版 CLI/GUI + exiftool。
+| 引擎 | 说明 |
+|------|------|
+| **浏览器内置** | ExifTool WASM + 段移植，文件不上传 |
+| **本地服务** | Node.js + **exiv2-wasm** 后端（全格式 HEIC/TIFF/WebP/JPEG，对齐 copy-img-meta） |
+
+浏览器内置参数与 [live-photo-conv `copy-img-meta`](https://github.com/wszqkzqk/live-photo-conv) 一一对应：
+
+| live-photo-conv | 网页功能二 |
+|-----------------|------------|
+| `--exclude-exif` | 排除 EXIF |
+| `--exclude-xmp` | 排除 XMP（**OPPO 推荐**预设） |
+| `--exclude-iptc` | 排除 IPTC |
+| 保留目标图像素与格式 | 保留目标图像素与格式 |
+
+元信息复制步骤、CLI 对比与机型水印排查见 **[docs/metadata-copy-analysis.md](docs/metadata-copy-analysis.md)**。
+
+**推荐 OPPO 流程**：功能二「OPPO 推荐（排除 XMP）」→ 功能一视频转实况。
 
 ### 命令行
 
@@ -201,7 +217,7 @@ build.bat           Windows 打 EXE 脚本
 ## 开发
 
 ```cmd
-pip install -e ".[dev]"
+pip install -e ".[dev,server]"
 ruff check src tests
 pytest
 ```
@@ -216,12 +232,76 @@ CI 在每次 push / PR 自动跑 ruff + pytest（Linux / macOS / Windows × Pyth
 
 `web/` 子目录是同一格式的纯前端 TypeScript + Vue3 实现，部署在 GitHub Pages 上：
 
-- `web/src/lib/muxer.ts` — 用纯 JS 写 OPPO MotionPhoto 字节结构（**不依赖 exiftool**）
-- `web/src/lib/metadata/` — 浏览器内 EXIF/IPTC 解析、移植与编辑
-- `web/src/lib/webcodecs.ts` — 基于 [mediabunny](https://mediabunny.dev/) + WebCodecs API 的硬件加速解码 / 编码 / 封装
-- `web/src/App.vue` — 四步向导 UI（视频 → 参考图 → 原生数据 → 导出）
+- `web/src/lib/muxer.ts` — OPPO MotionPhoto 字节结构（功能一，不依赖 exiftool）
+- `web/src/lib/metadata/` — ExifTool WASM 元信息复制（功能二）+ `backendCopy.ts` 本地后端客户端
+- `web/src/lib/webcodecs.ts` — 基于 [mediabunny](https://mediabunny.dev/) + WebCodecs API
+- `web/src/App.vue` — 功能一（视频→实况）+ 功能二（元信息复制）双 Tab
+- `backend/` — **Node.js FastAPI 替代**：exiv2-wasm 全格式 copy-img-meta（端口 28471）
+- `shared/metadata/` — 浏览器与后端共用的 JPEG 段移植 / ColorOS 校验逻辑
+- `src/oppo_live_photo/server.py` — 旧 Python 后端（保留供 CLI/pytest，默认不再启动）
 
 浏览器要求：**Chrome / Edge 94+** 或 **Safari 16.4+** 或 **Firefox 130+**（必须支持 WebCodecs API）。
+
+### 本地双服务模式（功能二 exiv2-wasm 后端）
+
+若浏览器 WASM 路径在手机上仍提示「无法获取照片详情」，可改用 **本地服务**：
+
+- **JPEG 源** → 二进制 APP 段移植（与 live-photo-conv GExiv2 等价，保留 II 字节序 + MakerNotes）
+- **HEIC / TIFF / WebP / PNG 源** → [exiv2-wasm](https://github.com/gerosyab/exiv2-wasm) 读源写目标
+- **live.jpg** → 智能 MP4 尾部分割 + ColorOS EXIF 校验 + GCamera MicroVideo XMP 同步
+
+**1. 一键启动前后端**（后端 `http://localhost:28471`，前端 `http://localhost:5173`）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-dev.ps1
+```
+
+或在 `web/` 目录：`npm run dev:all`
+
+**2. 仅启动后端**：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-backend.ps1
+```
+
+或：
+
+```cmd
+cd backend
+npm install
+npm run dev
+```
+
+验证：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:28471/api/health
+# gexiv2.backend 应为 "exiv2-wasm"，gexiv2.available 为 true
+```
+
+拷到手机前检查输出（bundled exiftool）：
+
+```powershell
+& "tools\exiftool\exiftool.exe" -ExifByteOrder -InteropIndex -Make -Model -MicroVideoOffset -Trailer your-meta.jpg
+```
+
+**3. 启动前端**：
+
+```cmd
+cd web
+npm install
+npm run dev
+```
+
+打开 `http://localhost:5173` → **功能二** → 选择 **「本地服务」** → 检测连接 → 复制元数据。
+
+**API 端点**：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/health` | 健康检查（`gexiv2.backend`: exiv2-wasm / jpeg-segment-transplant） |
+| `POST` | `/api/copy-metadata` | multipart: `source`, `dest` + `exclude_*` 表单字段 |
+| `POST` | `/api/mux-live-photo` | multipart: `image`, `video` → live-photo-make 合成 |
 
 本地开发：
 

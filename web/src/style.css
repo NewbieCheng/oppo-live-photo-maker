@@ -431,3 +431,87 @@ a:hover {
   line-height: 1.5;
   white-space: pre;
 }
+
+/* ---- Module tabs ---- */
+.module-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 24px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.module-tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 12px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+  font-family: inherit;
+}
+.module-tab:hover:not(.disabled):not(.active) {
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+}
+.module-tab.active {
+  background: rgba(255, 107, 53, 0.08);
+  border-color: rgba(255, 107, 53, 0.35);
+  color: var(--text);
+}
+.module-tab.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.module-tab-label {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.module-tab-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.module-tab.active .module-tab-hint {
+  color: var(--live);
+}
+
+/* ---- Metadata copy view ---- */
+.meta-copy-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+@media (max-width: 640px) {
+  .meta-copy-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.meta-copy-slot {
+  min-height: 160px;
+}
+.meta-copy-result {
+  margin-top: 16px;
+  padding: 12px 14px;
+  background: rgba(255, 107, 53, 0.06);
+  border: 1px solid rgba(255, 107, 53, 0.2);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--text-soft);
+}
+.meta-copy-result strong {
+  color: var(--live);
+}
+.meta-copy-hint {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--text-faint);
+  line-height: 1.55;
+}

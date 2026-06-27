@@ -9,6 +9,9 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
+
+VideoEmbedMode = Literal["full", "clip"]
 
 # Hide subprocess console windows on Windows when launched from a GUI bundle.
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
@@ -50,6 +53,7 @@ class VideoInfo:
     height: int
     rotation: int         # degrees, 0/90/180/270
     has_audio: bool
+    codec: str = ""       # e.g. h264, hevc
 
     @property
     def display_width(self) -> int:
@@ -107,7 +111,22 @@ def probe(video: str | Path) -> VideoInfo:
         height=height,
         rotation=rotation,
         has_audio=has_audio,
+        codec=str(vstream.get("codec_name") or ""),
     )
+
+
+def _build_vf(scale: str, rotation: int = 0) -> str:
+    """Build ffmpeg -vf chain: apply display rotation then scale."""
+    ops: list[str] = []
+    rot = rotation % 360
+    if rot == 90:
+        ops.append("transpose=1")
+    elif rot == 180:
+        ops.append("hflip,vflip")
+    elif rot == 270:
+        ops.append("transpose=2")
+    ops.append(scale)
+    return ",".join(ops)
 
 
 def extract_cover(
@@ -117,6 +136,7 @@ def extract_cover(
     timestamp: float = 0.0,
     target_long_edge: int = 1920,
     quality: int = 2,
+    rotation: int = 0,
 ) -> Path:
     """Extract a single still frame as JPEG.
 
@@ -133,14 +153,62 @@ def extract_cover(
         f"scale='if(gt(iw,ih),{target_long_edge},-2)':'"
         f"if(gt(iw,ih),-2,{target_long_edge})'"
     )
+    vf = _build_vf(scale, rotation)
     _run(
         [
             ffmpeg, "-y",
             "-ss", f"{max(0.0, timestamp):.3f}",
             "-i", str(video),
             "-frames:v", "1",
-            "-vf", scale,
+            "-vf", vf,
             "-q:v", str(quality),
+            str(out),
+        ]
+    )
+    return out
+
+
+def _export_heic_to_jpeg(reference: Path, out: Path) -> None:
+    """Decode tiled HEIC at full resolution when possible (OPPO phone photos)."""
+    try:
+        import pillow_heif  # type: ignore[import-untyped]
+        from PIL import Image
+
+        pillow_heif.register_heif_opener()
+        with Image.open(reference) as im:
+            im.convert("RGB").save(out, "JPEG", quality=95)
+        return
+    except ImportError:
+        pass
+    ffmpeg = _find("ffmpeg")
+    _run([ffmpeg, "-y", "-i", str(reference), "-q:v", "2", str(out)])
+
+
+def export_main_image(
+    reference: str | Path,
+    out_jpg: str | Path,
+) -> Path:
+    """Export cover JPEG like live-photo-conv ``export_main_image``.
+
+    JPEG is copied byte-for-byte; HEIC/HEIF use full-resolution decode when
+    ``pillow-heif`` is installed, otherwise ffmpeg (may yield tile previews).
+    """
+    ref = Path(reference)
+    out = Path(out_jpg)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    suffix = ref.suffix.lower()
+    if suffix in (".jpg", ".jpeg"):
+        shutil.copyfile(ref, out)
+        return out
+    if suffix in (".heic", ".heif"):
+        _export_heic_to_jpeg(ref, out)
+        return out
+    ffmpeg = _find("ffmpeg")
+    _run(
+        [
+            ffmpeg, "-y",
+            "-i", str(ref),
+            "-q:v", "2",
             str(out),
         ]
     )
@@ -186,6 +254,7 @@ def transcode_clip(
     maxrate_k: int | None = None,
     has_audio: bool | None = None,
     preset: str = "fast",
+    rotation: int = 0,
 ) -> Path:
     """Transcode a [start, start+duration] segment to H.264 MP4 suitable as
     the OPPO MotionPhoto video chunk.
@@ -210,12 +279,13 @@ def transcode_clip(
         f"scale='if(gt(iw,ih),{target_long_edge},-2)':'"
         f"if(gt(iw,ih),-2,{target_long_edge})',format=yuv420p"
     )
+    vf = _build_vf(scale, rotation)
     cmd = [
         ffmpeg, "-y",
         "-ss", f"{max(0.0, start):.3f}",
         "-i", str(video),
         "-t", f"{max(0.1, duration):.3f}",
-        "-vf", scale,
+        "-vf", vf,
         "-c:v", "libx264",
         "-profile:v", "high",
         "-pix_fmt", "yuv420p",
@@ -234,6 +304,68 @@ def transcode_clip(
     cmd.append(str(out))
     _run(cmd)
     return out
+
+
+def prepare_video_for_mux(
+    video: str | Path,
+    out_mp4: str | Path,
+    *,
+    mode: VideoEmbedMode = "full",
+    start: float = 0.0,
+    duration: float = 3.0,
+    target_long_edge: int = 1920,
+    crf: int = 23,
+    audio_bitrate_k: int = 128,
+    has_audio: bool | None = None,
+    preset: str = "fast",
+    rotation: int = 0,
+    max_full_seconds: float = 3.0,
+) -> Path:
+    """Prepare the MP4 chunk appended to the MotionPhoto JPEG.
+
+    ``full`` — stream-copy from source (live-photo-conv). If longer than
+    *max_full_seconds* (OPPO micro-video limit), copy only the first segment
+    without re-encoding.
+    ``clip`` — transcode a short H.264 segment (legacy mode).
+    """
+    video = Path(video)
+    out = Path(out_mp4)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    if mode == "full":
+        try:
+            info = probe(video)
+        except Exception:
+            info = None
+        dur = info.duration if info else max_full_seconds + 1
+        if dur <= max_full_seconds + 0.05:
+            shutil.copyfile(video, out)
+            return out
+        ffmpeg = _find("ffmpeg")
+        _run(
+            [
+                ffmpeg, "-y",
+                "-ss", f"{max(0.0, start):.3f}",
+                "-i", str(video),
+                "-t", f"{max_full_seconds:.3f}",
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(out),
+            ]
+        )
+        return out
+    return transcode_clip(
+        video,
+        out_mp4,
+        start=start,
+        duration=duration,
+        target_long_edge=target_long_edge,
+        crf=crf,
+        audio_bitrate_k=audio_bitrate_k,
+        has_audio=has_audio,
+        preset=preset,
+        rotation=rotation,
+    )
 
 
 def check_dependencies() -> list[str]:

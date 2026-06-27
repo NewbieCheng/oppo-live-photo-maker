@@ -169,9 +169,37 @@ function parseFromTags(tags: TagMap): NativeMetadataBundle {
   };
 }
 
+/** Parse all readable string tags (full copy mode for non-JPEG sources). */
+export function parseFullMetadataBundle(bytes: Uint8Array): NativeMetadataBundle {
+  const tags = flattenExifReaderTags(loadRawTags(bytes));
+  const base = parseFromTags(tags);
+  const exif = { ...base.exif };
+
+  const skipNames = new Set([
+    "Thumbnail",
+    "Images",
+    "MakerNote",
+    "UserComment",
+    "PrintIM",
+  ]);
+
+  for (const [name, tag] of Object.entries(tags)) {
+    if (skipNames.has(name)) continue;
+    if (MOTION_XMP_MARKERS.some((m) => name.includes(m))) continue;
+    if (exif[name]) continue;
+    const val = tagValue(tag);
+    if (val === undefined || val.length === 0 || val.length > 2048) continue;
+    if (/^GPS/.test(name) || /^[A-Z]/.test(name)) {
+      exif[name] = val;
+    }
+  }
+
+  return { ...base, exif };
+}
+
 /** Parse image bytes (JPEG / HEIC / PNG / WebP) into an editable metadata bundle. */
 export function parseFromTagMap(bytes: Uint8Array): NativeMetadataBundle {
-  return parseFromTags(flattenExifReaderTags(loadRawTags(bytes)));
+  return parseFullMetadataBundle(bytes);
 }
 
 /** Parse reference image into an editable metadata bundle. */

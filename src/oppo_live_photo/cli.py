@@ -47,8 +47,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--cover-mode",
         choices=("video", "reference"),
-        default="video",
-        help="Cover pixels from video frame (default) or reference image.",
+        default="reference",
+        help="Cover from reference image (default) or a video frame.",
+    )
+    p.add_argument(
+        "--video-mode",
+        choices=("full", "clip"),
+        default="full",
+        help="Embed full original video (default, live-photo-conv) or transcode a clip.",
     )
     p.add_argument(
         "--metadata-json",
@@ -125,13 +131,13 @@ def main(argv: list[str] | None = None) -> int:
     if reference and not reference.is_file():
         sys.stderr.write(f"Reference image not found: {reference}\n")
         return 2
-    if args.cover_mode == "reference" and reference is None:
-        sys.stderr.write("--cover-mode reference requires --reference-image\n")
-        return 2
 
     output = Path(args.output) if args.output else video.with_suffix(".live.jpg")
     cover_time = args.cover_time if args.cover_time is not None else args.start
-    cover_mode: metadata.CoverMode = args.cover_mode
+    cover_mode: metadata.CoverMode = (
+        "reference" if reference is not None and args.cover_mode == "reference" else "video"
+    )
+    video_mode = args.video_mode
 
     ref_bundle = metadata.parse_reference_image(reference) if reference else None
     overrides = _build_metadata_overrides(args)
@@ -166,24 +172,31 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             if cover_mode == "reference" and reference is not None:
-                log(f"[1/3] Using reference image as cover: {reference.name}")
-                ffmpeg_utils.prepare_reference_cover(
-                    reference, cover, target_long_edge=args.long_edge
-                )
+                log(f"[1/3] Exporting reference image as cover: {reference.name}")
+                ffmpeg_utils.export_main_image(reference, cover)
             else:
                 log(f"[1/3] Extracting cover frame at t={cover_time:.2f}s ...")
                 ffmpeg_utils.extract_cover(
-                    video, cover, timestamp=cover_time, target_long_edge=args.long_edge
+                    video, cover, timestamp=cover_time, target_long_edge=args.long_edge,
+                    rotation=info.rotation,
                 )
 
-            log(f"[2/3] Encoding {args.duration:.1f}s clip from t={args.start:.2f}s ...")
-            ffmpeg_utils.transcode_clip(
-                video, clip,
-                start=args.start, duration=args.duration,
-                target_long_edge=args.long_edge,
-                crf=args.crf, audio_bitrate_k=args.audio_kbps,
-                preset=args.preset, has_audio=info.has_audio,
-            )
+            if video_mode == "full":
+                log(f"[2/3] Embedding original video (stream copy) ...")
+                ffmpeg_utils.prepare_video_for_mux(
+                    video, clip, mode="full", start=args.start,
+                )
+            else:
+                log(f"[2/3] Encoding {args.duration:.1f}s clip from t={args.start:.2f}s ...")
+                ffmpeg_utils.prepare_video_for_mux(
+                    video, clip,
+                    mode="clip",
+                    start=args.start, duration=args.duration,
+                    target_long_edge=args.long_edge,
+                    crf=args.crf, audio_bitrate_k=args.audio_kbps,
+                    preset=args.preset, has_audio=info.has_audio,
+                    rotation=info.rotation,
+                )
 
             log(f"[3/3] Muxing OPPO MotionPhoto -> {output}")
             muxer.write_oppo_motionphoto(
@@ -193,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
                 presentation_timestamp_us=presentation_ts,
                 reference_jpg=reference,
                 metadata_overrides=meta_for_mux,
+                cover_mode=cover_mode,
             )
         except Exception as e:
             sys.stderr.write(f"Conversion failed: {e}\n")

@@ -31,10 +31,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+heic = [
+    "pillow-heif>=0.16",
+    "Pillow>=10",
+]
+server = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27",
+]
 dev = [
     "pytest>=7",
     "pytest-cov>=4",
     "ruff>=0.4",
+    "httpx>=0.27",
 ]
 build = [
     "pyinstaller>=6",
@@ -42,6 +53,7 @@ build = [
 
 [project.scripts]
 oppo-live = "oppo_live_photo.cli:main_entry"
+oppo-live-backend = "oppo_live_photo.server:main"
 
 [project.gui-scripts]
 oppo-live-gui = "oppo_live_photo.gui:main"

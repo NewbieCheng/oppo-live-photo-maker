@@ -15,6 +15,30 @@ from typing import Literal
 
 from . import muxer as _muxer
 
+# #region agent log
+def _agent_debug(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    import json
+    import time
+
+    payload = {
+        "sessionId": "1a8bb4",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    for base in (Path(__file__).resolve().parents[3], Path(__file__).resolve().parents[2]):
+        log_path = base / "debug-1a8bb4.log"
+        try:
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            break
+        except OSError:
+            continue
+
+
+# #endregion
 CoverMode = Literal["video", "reference"]
 
 OPPO_USER_COMMENT = "Oplus_8388608"
@@ -74,11 +98,15 @@ def compute_presentation_timestamp_us(
     user_override: int | None = None,
     user_set: bool = False,
 ) -> int:
-    """Compute MotionPhoto presentation timestamp in microseconds."""
+    """Compute MotionPhoto presentation timestamp in microseconds.
+
+    Mirrors live-photo-conv when a reference live photo supplies XMP ts; otherwise
+    OPPO native exports use ``0`` (Find X7/X8 samples), not ``-1``.
+    """
     if user_set and user_override is not None:
         return max(0, int(user_override))
-    if reference_ts is not None:
-        return max(0, int(reference_ts))
+    if reference_ts is not None and reference_ts >= 0:
+        return int(reference_ts)
     if cover_mode == "video":
         return max(0, int(round((cover_time - start) * 1_000_000)))
     return 0
@@ -107,9 +135,56 @@ def _run_exiftool_json(args: list[str]) -> list[dict]:
 def _pick_tags(record: dict, keys: tuple[str, ...]) -> dict[str, str]:
     out: dict[str, str] = {}
     for key in keys:
-        if key in record and record[key] is not None:
-            out[key] = str(record[key])
+        val = _resolve_tag(record, key)
+        if val is not None:
+            out[key] = val
     return out
+
+
+def _read_orientation_numeric(path: str | Path) -> int | None:
+    """Return EXIF Orientation as integer, or None if absent."""
+    records = _run_exiftool_json(["-EXIF:Orientation", str(path)])
+    record = records[0] if records else {}
+    for key in ("EXIF:Orientation", "IFD0:Orientation", "Orientation"):
+        raw = record.get(key)
+        if raw is None:
+            continue
+        with contextlib.suppress(ValueError, TypeError):
+            return int(raw)
+    return None
+
+
+def _resolve_tag(record: dict, canonical: str) -> str | None:
+    """Map exiftool -G1 keys (IFD0:/ExifIFD:/…) onto canonical EXIF:/Composite: names."""
+    bare = canonical.split(":", 1)[-1]
+    candidates = [
+        canonical,
+        f"IFD0:{bare}",
+        f"ExifIFD:{bare}",
+        f"Composite:{bare}",
+        f"GPS:{bare}",
+        f"IPTC:{bare}",
+        f"XMP:{bare}",
+        bare,
+    ]
+    # HEIC often stores ISO under PhotographicSensitivity / ISOSpeedRatings.
+    if bare == "ISO":
+        candidates.extend(
+            [
+                "ExifIFD:PhotographicSensitivity",
+                "ExifIFD:ISOSpeedRatings",
+                "EXIF:PhotographicSensitivity",
+                "EXIF:ISOSpeedRatings",
+            ]
+        )
+    for key in candidates:
+        if key not in record or record[key] is None:
+            continue
+        val = str(record[key]).strip()
+        if not val or val.startswith("(Binary data"):
+            continue
+        return val
+    return None
 
 
 def parse_reference_image(path: str | Path) -> NativeMetadataBundle:
@@ -124,9 +199,52 @@ def parse_reference_image(path: str | Path) -> NativeMetadataBundle:
     records = _run_exiftool_json([str(path)])
     record = records[0] if records else {}
 
+    # #region agent log
+    meta_keys = [
+        k for k in record
+        if any(
+            s in k.lower()
+            for s in ("make", "model", "gps", "datetime", "iso", "exif", "ifd", "quicktime", "xmp")
+        )
+    ]
+    _agent_debug(
+        "A",
+        "metadata.py:parse_reference_image",
+        "exiftool record keys sample",
+        {
+            "path": str(path),
+            "suffix": path.suffix.lower(),
+            "totalKeys": len(record),
+            "metaKeys": meta_keys[:40],
+            "exiftool": _muxer._find_exiftool(),
+        },
+    )
+    # #endregion
+
+    picked_exif = _pick_tags(record, EDITABLE_EXIF_KEYS)
+    picked_iptc = _pick_tags(record, EDITABLE_IPTC_KEYS)
+
+    # #region agent log
+    _agent_debug(
+        "A",
+        "metadata.py:parse_reference_image",
+        "picked tags after EDITABLE_* filter",
+        {
+            "exifCount": len(picked_exif),
+            "iptcCount": len(picked_iptc),
+            "exifKeys": list(picked_exif.keys()),
+            "makeCandidates": {
+                k: record.get(k)
+                for k in record
+                if "make" in k.lower() or "model" in k.lower()
+            },
+        },
+    )
+    # #endregion
+
     bundle = NativeMetadataBundle(
-        exif=_pick_tags(record, EDITABLE_EXIF_KEYS),
-        iptc=_pick_tags(record, EDITABLE_IPTC_KEYS),
+        exif=picked_exif,
+        iptc=picked_iptc,
     )
 
     for tag in _REF_TS_TAGS:
@@ -153,46 +271,102 @@ def bundle_from_json(path: str | Path) -> NativeMetadataBundle:
     )
 
 
+def copy_img_meta(
+    dest_jpg: str | Path,
+    source_img: str | Path,
+    *,
+    exclude_exif: bool = False,
+    exclude_xmp: bool = False,
+    exclude_iptc: bool = False,
+) -> None:
+    """Copy image metadata like live-photo-conv ``copy-img-meta``.
+
+    Defaults copy all metadata groups (EXIF, XMP, IPTC). Pass exclude flags to
+    omit groups. ``apply_native_metadata`` uses ``exclude_xmp=True`` so MotionPhoto
+    XMP is injected fresh during mux.
+    """
+    dest_jpg = Path(dest_jpg)
+    source_img = Path(source_img)
+    if not source_img.is_file():
+        raise FileNotFoundError(source_img)
+    if exclude_exif and exclude_xmp and exclude_iptc:
+        raise ValueError("At least one metadata group must be copied (EXIF, XMP, or IPTC)")
+    exiftool = _muxer._find_exiftool()
+    cmd = [
+        exiftool,
+        "-api",
+        "ByteOrder=II",
+        "-overwrite_original",
+        "-TagsFromFile",
+        str(source_img),
+        "-All:all",
+    ]
+    if exclude_xmp:
+        cmd.append("--XMP:all")
+    if exclude_iptc:
+        cmd.append("--IPTC:all")
+    if exclude_exif:
+        cmd.append("--EXIF:all")
+    cmd.append(str(dest_jpg))
+    _muxer._run(cmd)
+
+
 def apply_native_metadata(
     cover_jpg: str | Path,
     reference_jpg: str | Path | None = None,
     overrides: NativeMetadataBundle | None = None,
     *,
-    copy_exif: bool = True,
-    copy_iptc: bool = True,
+    preserve_orientation: bool = False,
 ) -> None:
-    """Transplant EXIF/IPTC onto *cover_jpg* (in place).
+    """Transplant metadata onto *cover_jpg* (in place).
 
-    Mirrors ``copy-img-meta --exclude-xmp``: copy blocks from reference, apply
-    user overrides, then force OPPO ``UserComment``.
+    Step 1 — ``copy_img_meta --exclude-xmp`` (full EXIF/IPTC/GPS block).
+    Step 2 — user overrides, OPPO ``UserComment``, optional orientation fix.
     """
     cover_jpg = Path(cover_jpg)
     exiftool = _muxer._find_exiftool()
 
-    cmd: list[str] = [exiftool, "-overwrite_original"]
+    # #region agent log
+    orient_before = _read_orientation_numeric(cover_jpg)
+    # #endregion
 
     if reference_jpg is not None:
-        ref = Path(reference_jpg)
-        if not ref.is_file():
-            raise FileNotFoundError(ref)
-        tags_from: list[str] = []
-        if copy_exif:
-            tags_from.extend(["-EXIF:all"])
-        if copy_iptc:
-            tags_from.extend(["-IPTC:all"])
-        if tags_from:
-            cmd.extend(["-TagsFromFile", str(ref), *tags_from])
+        copy_img_meta(cover_jpg, reference_jpg, exclude_xmp=True)
+
+    cmd: list[str] = [exiftool, "-overwrite_original"]
 
     if overrides:
         for key, value in overrides.exif.items():
+            if preserve_orientation and key.endswith("Orientation"):
+                continue
             cmd.append(f"-{key}={value}")
         for key, value in overrides.iptc.items():
             cmd.append(f"-{key}={value}")
 
+    if not preserve_orientation:
+        # Video-frame covers are rotation-corrected in pixels; plain
+        # -Orientation=1 means Rotate 180 — use numeric tag instead.
+        cmd.append("-Orientation#=1")
     cmd.append(f"-EXIF:UserComment={OPPO_USER_COMMENT}")
     cmd.append(str(cover_jpg))
-
     _muxer._run(cmd)
+
+    # #region agent log
+    _agent_debug(
+        "M1",
+        "metadata.py:apply_native_metadata",
+        "metadata applied to cover",
+        {
+            "cover": str(cover_jpg),
+            "reference": str(reference_jpg) if reference_jpg else None,
+            "overrideExifKeys": list(overrides.exif.keys()) if overrides else [],
+            "orientationBefore": orient_before,
+            "orientationAfter": _read_orientation_numeric(cover_jpg),
+            "preserveOrientation": preserve_orientation,
+            "exiftoolCmdTail": cmd[-4:],
+        },
+    )
+    # #endregion
 
 
 def merge_bundles(

@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# ExifTool WASM (optional local copy; browser loads from CDN)
+public/zeroperl.wasm

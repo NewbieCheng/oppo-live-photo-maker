@@ -55,6 +55,11 @@ export const METADATA_FIELD_GROUPS: MetadataFieldGroup[] = [
     ],
   },
   {
+    id: "other",
+    title: "其他",
+    fields: [{ key: "UserComment", label: "UserComment（OPPO 识别）" }],
+  },
+  {
     id: "iptc",
     title: "IPTC",
     fields: [

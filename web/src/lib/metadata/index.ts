@@ -21,4 +21,17 @@ export {
   referenceJpegForMux,
   type LoadedReferenceImage,
 } from "./referenceLoad";
-export { applyNativeMetadata, buildSyntheticReferenceJpeg, OPPO_USER_COMMENT } from "./apply";
+export { applyNativeMetadata, buildSyntheticReferenceJpeg, applySourceMetadataEdits, OPPO_USER_COMMENT } from "./apply";
+export { copyImageMetadata, type CopyMetadataOptions, type CopyMetadataResult, OPPO_COPY_PRESET } from "./copyMeta";
+export {
+  computeDirtyKeys,
+  hasMetadataEdits,
+  sourceEditsForCopy,
+  buildEffectiveSourceBundle,
+} from "./sourceMetadataEdits";
+export {
+  buildTagsFromFileArgs,
+  validateCopyOptions as validateCopyMetadataOptions,
+} from "./copyContract";
+export { previewBlobForImageFile, rasterImageToJpegBytes } from "./imageToJpeg";
+export { extractRawXmpPackets, buildXmpApp1Segment } from "./xmp";

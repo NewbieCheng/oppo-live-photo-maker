@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { _internal, buildOppoMotionPhoto } from "./muxer";
+import { insertAfterAppSegments } from "./metadata/segments";
+import { _internal, buildOppoMotionPhoto, rebuildMotionPhotoXmpInJpeg } from "./muxer";
 
 const { findInsertionPoint, buildMpfSegment, buildXmpPacket, buildExifApp1, buildXmpApp1 } =
   _internal;
@@ -174,5 +175,32 @@ describe("buildOppoMotionPhoto end-to-end", () => {
     expect(text).toContain("Oplus_8388608");
     expect(text).toContain("MPF\0");
     expect(text).toContain("ns.oplus.com");
+  });
+});
+
+describe("rebuildMotionPhotoXmpInJpeg", () => {
+  function tinyJpeg(): Uint8Array {
+    const app0 = seg(0xe0, new TextEncoder().encode("JFIF\0\x01\x01\x00\x00\x01\x00\x01\x00\x00"));
+    const dqt = seg(0xdb, new Uint8Array(64).fill(16));
+    return concat(new Uint8Array([0xff, 0xd8]), app0, dqt, new Uint8Array([0xff, 0xd9]));
+  }
+
+  it("rewrites MicroVideoOffset and VideoLength to match tail size", () => {
+    const mp4 = new Uint8Array(999);
+    mp4[4] = 0x66;
+    mp4[5] = 0x74;
+    mp4[6] = 0x79;
+    mp4[7] = 0x70;
+    const jpeg = insertAfterAppSegments(tinyJpeg(), [
+      buildXmpApp1({ videoLength: 1, presentationTimestampUs: 0 }),
+      buildMpfSegment(100),
+    ]);
+    const rebuilt = rebuildMotionPhotoXmpInJpeg(jpeg, mp4.length);
+    const text = new TextDecoder("latin1").decode(rebuilt);
+    expect(text).toContain('GCamera:MicroVideoOffset="999"');
+    expect(text).toContain('OpCamera:VideoLength="999"');
+    expect(text).toContain("<Item:Length>999</Item:Length>");
+    expect(text).not.toContain('GCamera:MicroVideoOffset="1"');
+    expect(text).not.toContain("MPF\0");
   });
 });

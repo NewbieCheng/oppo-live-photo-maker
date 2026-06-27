@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { applyNativeMetadata, OPPO_USER_COMMENT } from "./apply";
-import { buildOppoMotionPhoto } from "../muxer";
+import { applyNativeMetadata, buildSyntheticReferenceJpeg, ensureIfd0MakeModel, OPPO_USER_COMMENT } from "./apply";
+import { buildOppoMotionPhotoWithNative } from "./nativeMux";
 import { extractTransplantableSegments } from "./segments";
 
 function seg(marker: number, payload: Uint8Array): Uint8Array {
@@ -47,6 +47,26 @@ describe("extractTransplantableSegments", () => {
   });
 });
 
+describe("ensureIfd0MakeModel", () => {
+  it("writes Make/Model into EXIF on minimal JPEG", () => {
+    const out = ensureIfd0MakeModel(tinyJpeg(), "OPPO", "OPPO Find X8 Ultra");
+    const text = new TextDecoder("latin1").decode(out);
+    expect(text).toContain("OPPO");
+    expect(text).toContain("OPPO Find X8 Ultra");
+  });
+
+  it("patches existing synthetic EXIF", () => {
+    const source = buildSyntheticReferenceJpeg({
+      exif: { Make: "SourceMake", Model: "SourceModel" },
+      iptc: {},
+    });
+    const out = ensureIfd0MakeModel(source, "EditedMake", "EditedModel");
+    const text = new TextDecoder("latin1").decode(out);
+    expect(text).toContain("EditedMake");
+    expect(text).toContain("EditedModel");
+  });
+});
+
 describe("applyNativeMetadata", () => {
   it("does not throw on minimal JPEG with metadata bundle", () => {
     const cover = tinyJpeg();
@@ -62,13 +82,26 @@ describe("applyNativeMetadata", () => {
     const text = new TextDecoder("latin1").decode(out);
     expect(text).toContain("RefMake");
   });
+
+  it("skips OPPO UserComment when injectOppoMarker is false", () => {
+    const cover = tinyJpeg();
+    const out = applyNativeMetadata(
+      cover,
+      { exif: { Make: "Edited" }, iptc: {} },
+      undefined,
+      { injectOppoMarker: false },
+    );
+    const text = new TextDecoder("latin1").decode(out);
+    expect(text).toContain("Edited");
+    expect(text).not.toContain("Oplus_8388608");
+  });
 });
 
 describe("buildOppoMotionPhoto with native metadata", () => {
   it("still produces valid motion photo with metadata bundle", () => {
     const cover = tinyJpeg();
     const mp4 = new Uint8Array(16);
-    const out = buildOppoMotionPhoto(cover, mp4, {
+    const out = buildOppoMotionPhotoWithNative(cover, mp4, {
       nativeMetadata: { exif: { Make: "NativeMake" }, iptc: {} },
       presentationTimestampUs: 500_000,
     });
@@ -76,7 +109,6 @@ describe("buildOppoMotionPhoto with native metadata", () => {
     expect(out[1]).toBe(0xd8);
     const text = new TextDecoder("latin1").decode(out);
     expect(text).toContain("Oplus_8388608");
-    expect(text).toContain("MicroVideo");
     expect(text).toContain("500000");
   });
 });

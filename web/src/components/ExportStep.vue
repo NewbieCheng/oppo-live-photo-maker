@@ -1,15 +1,24 @@
 <script setup lang="ts">
-defineProps<{
-  status: "idle" | "running" | "done" | "error";
-  statusText: string;
-  errorText: string;
-  progress: number;
-  log: string[];
-  resultUrl: string;
-  resultName: string;
-  resultSize: number;
-  canConvert: boolean;
-}>();
+withDefaults(
+  defineProps<{
+    title?: string;
+    description?: string;
+    status: "idle" | "running" | "done" | "error";
+    statusText: string;
+    errorText: string;
+    progress: number;
+    log: string[];
+    resultUrl: string;
+    resultName: string;
+    resultSize: number;
+    canConvert: boolean;
+  }>(),
+  {
+    title: "生成实况图",
+    description:
+      "封面、视频片段与元数据将在本地合成，输出 OPPO 相册可识别的 MotionPhoto JPEG。",
+  },
+);
 
 const emit = defineEmits<{
   convert: [];
@@ -18,10 +27,8 @@ const emit = defineEmits<{
 
 <template>
   <section class="panel export-step">
-    <p class="panel-title">生成实况图</p>
-    <p class="panel-desc">
-      封面、视频片段与元数据将在本地合成，输出 OPPO 相册可识别的 MotionPhoto JPEG。
-    </p>
+    <p class="panel-title">{{ title }}</p>
+    <p class="panel-desc">{{ description }}</p>
 
     <button
       type="button"

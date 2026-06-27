@@ -1,0 +1,10 @@
+{
+  "name": "@oppo-live/shared-metadata",
+  "private": true,
+  "version": "0.1.1",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./*": "./*"
+  }
+}

@@ -5,18 +5,19 @@
  *
  *   [JPEG:
  *      SOI
- *      APP1 (EXIF with UserComment = "Oplus_8388608")
+ *      APP1 (EXIF — preserve source Make/Model + UserComment = "Oplus_8388608")
  *      APP1 (XMP — GCamera + OpCamera + Container/Item)
  *      APP2 (MPF — NumberOfImages = 1, Baseline MP Primary)
  *      ... rest of original JPEG ...
  *      EOI ]
  *   [ MP4 trailer ]
+ *
+ * Kept identical to Young-Spark/oppo-live-photo-maker upstream for feature-one reliability,
+ * except EXIF camera tags are preserved when present (live-photo-conv / Python mux semantics).
  */
 
-import {
-  applyNativeMetadata,
-  type NativeMetadataBundle,
-} from "./metadata";
+import piexif from "piexifjs";
+import { insertAfterAppSegments, isExifApp1, scanJpegSegments, stripXmpAndMpf } from "./metadata/segments";
 
 const enc = new TextEncoder();
 
@@ -37,14 +38,6 @@ function writeU16BE(value: number): Uint8Array {
   return b;
 }
 
-// ---------- JPEG segment scanner ------------------------------------------
-
-/**
- * Find a safe offset to insert APPn segments: right after SOI + any existing
- * APPn segments, before the first DQT/DHT/SOF/SOS marker.
- *
- * Mirrors the Python ``_find_app_insertion_point``.
- */
 function findInsertionPoint(jpeg: Uint8Array): number {
   if (jpeg.length < 2 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
     throw new Error("Not a JPEG: missing SOI marker");
@@ -53,19 +46,17 @@ function findInsertionPoint(jpeg: Uint8Array): number {
   let lastAppEnd = 2;
   const n = jpeg.length;
   while (i < n - 1) {
-    // Allow legal 0xFF padding before the next marker.
     while (i < n && jpeg[i] === 0xff && i + 1 < n && jpeg[i + 1] === 0xff) {
       i++;
     }
     if (i >= n - 1 || jpeg[i] !== 0xff) return lastAppEnd;
     const marker = jpeg[i + 1];
-    if (marker === 0xda || marker === 0xd9) return lastAppEnd; // SOS / EOI
+    if (marker === 0xda || marker === 0xd9) return lastAppEnd;
     if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-      return lastAppEnd; // SOF
+      return lastAppEnd;
     }
-    if (marker === 0xdb || marker === 0xc4) return lastAppEnd; // DQT / DHT
+    if (marker === 0xdb || marker === 0xc4) return lastAppEnd;
     if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
-      // Standalone marker (TEM / RSTn) — no length bytes.
       i += 2;
       continue;
     }
@@ -78,86 +69,32 @@ function findInsertionPoint(jpeg: Uint8Array): number {
   return lastAppEnd;
 }
 
-function isExifApp1Payload(payload: Uint8Array): boolean {
-  if (payload.length < 6) return false;
-  return new TextDecoder("ascii").decode(payload.subarray(0, 6)) === "Exif\0\0";
-}
-
-function isMotionXmpPayload(payload: Uint8Array): boolean {
-  const text = new TextDecoder("latin1").decode(payload);
-  return (
-    text.includes("http://ns.adobe.com/xap/1.0/") &&
-    (text.includes("GCamera:MotionPhoto") ||
-      text.includes("GCamera:MicroVideo") ||
-      text.includes("OpCamera:MotionPhotoOwner") ||
-      text.includes("Container:Directory"))
-  );
-}
-
-function isMpfPayload(payload: Uint8Array): boolean {
-  return payload.length >= 4 && new TextDecoder("ascii").decode(payload.subarray(0, 4)) === "MPF\0";
-}
-
-function hasExifApp1(jpeg: Uint8Array): boolean {
-  if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8) return false;
-  let i = 2;
-  const n = jpeg.length;
-  while (i < n - 1) {
-    while (i < n && jpeg[i] === 0xff && i + 1 < n && jpeg[i + 1] === 0xff) i++;
-    if (i >= n - 1 || jpeg[i] !== 0xff) break;
-    const marker = jpeg[i + 1];
-    if (marker === 0xda || marker === 0xd9) break;
-    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
-      i += 2;
-      continue;
-    }
-    if (i + 4 > n) break;
-    const segLen = (jpeg[i + 2] << 8) | jpeg[i + 3];
-    if (segLen < 2 || i + 2 + segLen > n) break;
-    const payload = jpeg.subarray(i + 4, i + 2 + segLen);
-    if (marker === 0xe1 && isExifApp1Payload(payload)) return true;
-    i += 2 + segLen;
+function ensureOppoUserComment(jpeg: Uint8Array): Uint8Array {
+  const hasExif = scanJpegSegments(jpeg).some((s) => isExifApp1(s));
+  if (!hasExif) {
+    return insertAfterAppSegments(jpeg, [buildExifApp1()]);
   }
-  return false;
+
+  try {
+    let binary = "";
+    for (let i = 0; i < jpeg.length; i++) binary += String.fromCharCode(jpeg[i]);
+    const dataUrl = `data:image/jpeg;base64,${btoa(binary)}`;
+    const exifObj = piexif.load(dataUrl);
+    if (!exifObj.Exif) exifObj.Exif = {};
+    exifObj.Exif[piexif.ExifIFD.UserComment] = "ASCII\0\0\0Oplus_8388608";
+    const dumped = piexif.dump(exifObj);
+    const outUrl = piexif.insert(dumped, dataUrl);
+    const comma = outUrl.indexOf(",");
+    const outB64 = outUrl.slice(comma + 1);
+    const raw = atob(outB64);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  } catch {
+    return insertAfterAppSegments(jpeg, [buildExifApp1()]);
+  }
 }
 
-/** Strip motion-photo XMP + MPF; keep native EXIF/IPTC segments. */
-function stripMotionPhotoMetadata(jpeg: Uint8Array): Uint8Array {
-  if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
-    throw new Error("Not a JPEG: missing SOI marker");
-  }
-  const out: number[] = [0xff, 0xd8];
-  let i = 2;
-  const n = jpeg.length;
-  while (i < n - 1) {
-    while (i < n && jpeg[i] === 0xff && i + 1 < n && jpeg[i + 1] === 0xff) i++;
-    if (i >= n - 1 || jpeg[i] !== 0xff) break;
-    const marker = jpeg[i + 1];
-    if (marker === 0xda || marker === 0xd9) {
-      for (let k = i; k < n; k++) out.push(jpeg[k]);
-      return new Uint8Array(out);
-    }
-    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
-      out.push(0xff, marker);
-      i += 2;
-      continue;
-    }
-    if (i + 4 > n) break;
-    const segLen = (jpeg[i + 2] << 8) | jpeg[i + 3];
-    if (segLen < 2 || i + 2 + segLen > n) break;
-    const payload = jpeg.subarray(i + 4, i + 2 + segLen);
-    const drop =
-      (marker === 0xe2 && isMpfPayload(payload)) ||
-      (marker === 0xe1 && isMotionXmpPayload(payload));
-    if (!drop) {
-      for (let k = i; k < i + 2 + segLen; k++) out.push(jpeg[k]);
-    }
-    i += 2 + segLen;
-  }
-  return jpeg;
-}
-
-/** Strip any existing APP1/APP2 (EXIF/XMP/MPF) segments so re-muxing stays clean. */
 function stripExistingMetadata(jpeg: Uint8Array): Uint8Array {
   if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
     throw new Error("Not a JPEG: missing SOI marker");
@@ -170,7 +107,6 @@ function stripExistingMetadata(jpeg: Uint8Array): Uint8Array {
     if (i >= n - 1 || jpeg[i] !== 0xff) break;
     const marker = jpeg[i + 1];
     if (marker === 0xda || marker === 0xd9) {
-      // From SOS onward copy the rest verbatim (entropy-coded data + EOI).
       for (let k = i; k < n; k++) out.push(jpeg[k]);
       return new Uint8Array(out);
     }
@@ -182,37 +118,22 @@ function stripExistingMetadata(jpeg: Uint8Array): Uint8Array {
     if (i + 4 > n) break;
     const segLen = (jpeg[i + 2] << 8) | jpeg[i + 3];
     if (segLen < 2 || i + 2 + segLen > n) break;
-    // Drop APP1 (EXIF/XMP) and APP2 (MPF / FlashPix). Keep everything else.
     if (marker !== 0xe1 && marker !== 0xe2) {
       for (let k = i; k < i + 2 + segLen; k++) out.push(jpeg[k]);
     }
     i += 2 + segLen;
   }
-  // Fallback (truncated input): return as-is.
   return jpeg;
 }
 
-// ---------- EXIF (UserComment = Oplus_8388608) ----------------------------
-
-/**
- * Build a minimal APP1 EXIF segment containing only the UserComment tag set
- * to "Oplus_8388608" (ASCII). OPPO Photos requires this marker.
- */
 function buildExifApp1(): Uint8Array {
-  // 8-byte UserComment character-code prefix, ASCII variant.
   const ASCII_PREFIX = enc.encode("ASCII\0\0\0");
   const COMMENT = enc.encode("Oplus_8388608");
   const userCommentValue = concat(ASCII_PREFIX, COMMENT);
 
-  // TIFF header (little-endian, IFD at offset 8).
-  const tiff: number[] = [
-    0x49, 0x49, 0x2a, 0x00,
-    0x08, 0x00, 0x00, 0x00,
-  ];
+  const tiff: number[] = [0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00];
 
-  // IFD0: 1 entry pointing to Exif IFD.
   const ifdEntries = (entries: { tag: number; type: number; count: number; value: Uint8Array }[]) => {
-    // Each entry is 12 bytes: tag(2) type(2) count(4) value-or-offset(4).
     const out: number[] = [];
     out.push(entries.length & 0xff, (entries.length >> 8) & 0xff);
     for (const e of entries) {
@@ -222,35 +143,22 @@ function buildExifApp1(): Uint8Array {
       out.push(c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff, (c >> 24) & 0xff);
       for (let k = 0; k < 4; k++) out.push(e.value[k] || 0);
     }
-    out.push(0, 0, 0, 0); // next IFD = 0
+    out.push(0, 0, 0, 0);
     return out;
   };
 
-  // Layout offsets (from start of TIFF header):
-  //   0..7   TIFF header
-  //   8..    IFD0 (one entry, 12B + 2B count + 4B next = 18B)
-  //   26..   Exif IFD (one entry: UserComment)
-  //   ...    UserComment data
   const IFD0_OFFSET = 8;
-  const EXIF_IFD_OFFSET = IFD0_OFFSET + 2 + 12 + 4; // = 26
-  const userCommentDataOffset = EXIF_IFD_OFFSET + 2 + 12 + 4; // entries(2) + 1 entry(12) + next(4)
+  const EXIF_IFD_OFFSET = IFD0_OFFSET + 2 + 12 + 4;
+  const userCommentDataOffset = EXIF_IFD_OFFSET + 2 + 12 + 4;
 
-  // IFD0 entry: ExifOffset (0x8769), LONG, count=1, value=offset to Exif IFD.
   const u32le = (n: number): Uint8Array => {
     const b = new Uint8Array(4);
     new DataView(b.buffer).setUint32(0, n, true);
     return b;
   };
-  const ifd0 = ifdEntries([
-    { tag: 0x8769, type: 4, count: 1, value: u32le(EXIF_IFD_OFFSET) },
-  ]);
-
-  // Exif IFD entry: UserComment (0x9286), UNDEFINED(7), count = bytes,
-  //   value = offset to data block.
+  const ifd0 = ifdEntries([{ tag: 0x8769, type: 4, count: 1, value: u32le(EXIF_IFD_OFFSET) }]);
   const ucBytes = userCommentValue.length;
-  const exifIfd = ifdEntries([
-    { tag: 0x9286, type: 7, count: ucBytes, value: u32le(userCommentDataOffset) },
-  ]);
+  const exifIfd = ifdEntries([{ tag: 0x9286, type: 7, count: ucBytes, value: u32le(userCommentDataOffset) }]);
 
   const tiffBlock = concat(
     new Uint8Array(tiff),
@@ -259,25 +167,21 @@ function buildExifApp1(): Uint8Array {
     userCommentValue,
   );
 
-  // APP1 segment: marker + length + "Exif\0\0" + TIFF block.
   const exifHeader = enc.encode("Exif\0\0");
-  // Length is BIG ENDIAN even though the TIFF inside is little-endian.
   const segBody = concat(exifHeader, tiffBlock);
   const segLen = segBody.length + 2;
   return concat(new Uint8Array([0xff, 0xe1]), writeU16BE(segLen), segBody);
 }
 
-// ---------- XMP packet ----------------------------------------------------
-
 export interface XmpFields {
-  videoLength: number; // bytes
+  videoLength: number;
   presentationTimestampUs?: number;
 }
 
 function buildXmpPacket(fields: XmpFields): string {
   const ts = fields.presentationTimestampUs ?? 0;
+  const tsMicro = ts === 0 ? -1 : ts;
   const len = fields.videoLength;
-  // GContainer Item structures live in their own namespace.
   return (
     `<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>\n` +
     `<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="oppo-live-photo-web">\n` +
@@ -287,13 +191,13 @@ function buildXmpPacket(fields: XmpFields): string {
     `    xmlns:OpCamera="http://ns.oplus.com/photos/1.0/camera/"\n` +
     `    xmlns:Container="http://ns.google.com/photos/1.0/container/"\n` +
     `    xmlns:Item="http://ns.google.com/photos/1.0/container/item/"\n` +
+    `    GCamera:MicroVideoVersion="1"\n` +
+    `    GCamera:MicroVideo="1"\n` +
+    `    GCamera:MicroVideoOffset="${len}"\n` +
+    `    GCamera:MicroVideoPresentationTimestampUs="${tsMicro}"\n` +
     `    GCamera:MotionPhoto="1"\n` +
     `    GCamera:MotionPhotoVersion="1"\n` +
-    `    GCamera:MotionPhotoPresentationTimestampUs="${ts}"\n` +
-    `    GCamera:MicroVideo="1"\n` +
-    `    GCamera:MicroVideoVersion="1"\n` +
-    `    GCamera:MicroVideoOffset="${len}"\n` +
-    `    GCamera:MicroVideoPresentationTimestampUs="${ts}"\n` +
+    `    GCamera:MotionPhotoPresentationTimestampUs="${tsMicro}"\n` +
     `    OpCamera:MotionPhotoPrimaryPresentationTimestampUs="${ts}"\n` +
     `    OpCamera:MotionPhotoOwner="oplus"\n` +
     `    OpCamera:OLivePhotoVersion="2"\n` +
@@ -326,14 +230,13 @@ function buildXmpPacket(fields: XmpFields): string {
   );
 }
 
-const XMP_NS_URI = "http://ns.adobe.com/xap/1.0/\0"; // 29 bytes incl. null
+const XMP_NS_URI = "http://ns.adobe.com/xap/1.0/\0";
 
 function buildXmpApp1(fields: XmpFields): Uint8Array {
   const xmp = buildXmpPacket(fields);
   const xmpBytes = enc.encode(xmp);
   const headerBytes = enc.encode(XMP_NS_URI);
   const body = concat(headerBytes, xmpBytes);
-  // APP1 segment max payload is 65533. A single XMP fits comfortably here.
   if (body.length > 65533) {
     throw new Error("XMP packet exceeds APP1 size limit (extended XMP not supported)");
   }
@@ -341,22 +244,15 @@ function buildXmpApp1(fields: XmpFields): Uint8Array {
   return concat(new Uint8Array([0xff, 0xe1]), writeU16BE(segLen), body);
 }
 
-// ---------- MPF (Multi-Picture Format) APP2 segment -----------------------
-
 function buildMpfSegment(imageSize: number): Uint8Array {
-  // Big-endian TIFF header, IFD at offset 8.
   const tiff = new Uint8Array([0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08]);
-
   const entries: number[] = [];
-  // 0xB000 MPFVersion, UNDEFINED(7), count=4, value="0100"
   entries.push(0xb0, 0x00, 0x00, 0x07);
   entries.push(0, 0, 0, 4);
   entries.push(0x30, 0x31, 0x30, 0x30);
-  // 0xB001 NumberOfImages, LONG(4), count=1, value=1
   entries.push(0xb0, 0x01, 0x00, 0x04);
   entries.push(0, 0, 0, 1);
   entries.push(0, 0, 0, 1);
-  // 0xB002 MPEntry, UNDEFINED(7), count=16, value=offset to MP entry block
   const mpEntryOffset = 8 + 2 + 3 * 12 + 4;
   entries.push(0xb0, 0x02, 0x00, 0x07);
   entries.push(0, 0, 0, 16);
@@ -368,67 +264,42 @@ function buildMpfSegment(imageSize: number): Uint8Array {
   );
 
   const ifd: number[] = [];
-  ifd.push(0, 3); // 3 entries (BE)
+  ifd.push(0, 3);
   ifd.push(...entries);
-  ifd.push(0, 0, 0, 0); // next IFD = 0
+  ifd.push(0, 0, 0, 0);
 
-  // MP entry data: image attribute (Baseline Primary) + size + 8 zero bytes.
   const mpEntry = new Uint8Array(16);
   const dv = new DataView(mpEntry.buffer);
-  dv.setUint32(0, 0x00030000, false); // image attr
+  dv.setUint32(0, 0x00030000, false);
   dv.setUint32(4, imageSize, false);
-  // dv[8..15] left zero (offset + dependent images).
 
   const body = concat(enc.encode("MPF\0"), tiff, new Uint8Array(ifd), mpEntry);
   const segLen = body.length + 2;
   return concat(new Uint8Array([0xff, 0xe2]), writeU16BE(segLen), body);
 }
 
-// ---------- Public API ----------------------------------------------------
-
 export interface MuxOptions {
   presentationTimestampUs?: number;
-  nativeMetadata?: NativeMetadataBundle;
-  referenceJpeg?: Uint8Array;
 }
 
-/**
- * Combine a JPEG cover + an MP4 clip into an OPPO MotionPhoto JPEG.
- *
- * Returns a fresh Uint8Array; both inputs are read-only.
- */
+/** Feature-one entry: video cover + clip → OPPO MotionPhoto (upstream-compatible). */
 export function buildOppoMotionPhoto(
   coverJpeg: Uint8Array,
   videoMp4: Uint8Array,
   options: MuxOptions = {},
 ): Uint8Array {
-  const hasNative = Boolean(options.nativeMetadata || options.referenceJpeg);
-  let prepared = coverJpeg;
-  if (hasNative) {
-    prepared = applyNativeMetadata(
-      coverJpeg,
-      options.nativeMetadata,
-      options.referenceJpeg,
-    );
-  }
-
-  const cleanJpeg = hasNative
-    ? stripMotionPhotoMetadata(prepared)
-    : stripExistingMetadata(prepared);
-
-  const ts = options.presentationTimestampUs ?? 0;
+  const baseJpeg = ensureOppoUserComment(stripXmpAndMpf(coverJpeg));
   const xmp = buildXmpApp1({
     videoLength: videoMp4.length,
-    presentationTimestampUs: ts,
+    presentationTimestampUs: options.presentationTimestampUs ?? 0,
   });
 
-  const insAfterSoi = findInsertionPoint(cleanJpeg);
-  const parts: Uint8Array[] = [cleanJpeg.subarray(0, insAfterSoi)];
-  if (!hasExifApp1(cleanJpeg)) {
-    parts.push(buildExifApp1());
-  }
-  parts.push(xmp, cleanJpeg.subarray(insAfterSoi));
-  const withMeta = concat(...parts);
+  const insAfterSoi = findInsertionPoint(baseJpeg);
+  const withMeta = concat(
+    baseJpeg.subarray(0, insAfterSoi),
+    xmp,
+    baseJpeg.subarray(insAfterSoi),
+  );
 
   const dummyMpf = buildMpfSegment(0);
   const finalSize = withMeta.length + dummyMpf.length;
@@ -447,12 +318,35 @@ export function buildOppoMotionPhoto(
   return concat(finalJpeg, videoMp4);
 }
 
-// Internal helpers exported for tests.
+/**
+ * Re-write MotionPhoto XMP on an existing JPEG (keep EXIF/IPTC).
+ * Matches live-photo-conv GExiv2 export: GCamera MicroVideo + Container, no APP2 MPF.
+ * Used after copy-img-meta on live.jpg so video size tags match appended MP4 tail.
+ */
+export function rebuildMotionPhotoXmpInJpeg(
+  jpeg: Uint8Array,
+  videoLength: number,
+  options: MuxOptions = {},
+): Uint8Array {
+  const baseJpeg = stripXmpAndMpf(jpeg);
+  const xmp = buildXmpApp1({
+    videoLength,
+    presentationTimestampUs: options.presentationTimestampUs ?? 0,
+  });
+
+  const insAfterSoi = findInsertionPoint(baseJpeg);
+  return concat(
+    baseJpeg.subarray(0, insAfterSoi),
+    xmp,
+    baseJpeg.subarray(insAfterSoi),
+  );
+}
+
 export const _internal = {
   findInsertionPoint,
   stripExistingMetadata,
-  stripMotionPhotoMetadata,
-  hasExifApp1,
+  stripXmpAndMpf,
+  ensureOppoUserComment,
   buildMpfSegment,
   buildExifApp1,
   buildXmpApp1,

@@ -31,6 +31,12 @@ foreach ($tool in $required) {
 }
 
 Write-Host ""
+Write-Host "Optional: full-resolution HEIC reference export" -ForegroundColor Cyan
+Write-Host "  pip install -e .[heic]   OR   scripts/setup-heic.ps1"
+Write-Host ""
+Write-Host "Conv-style workflow (reference + full video append):" -ForegroundColor Cyan
+Write-Host "  scripts/conv-workflow.ps1 -ReferenceImage ref.heic -Video clip.mp4"
+Write-Host ""
 if ($missing.Count -gt 0) {
     Write-Host "Install missing tools:" -ForegroundColor Yellow
     Write-Host "  ffmpeg  -> https://ffmpeg.org/download.html"

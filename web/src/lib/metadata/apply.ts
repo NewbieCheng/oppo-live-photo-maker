@@ -1,9 +1,12 @@
 import piexif from "piexifjs";
+import { bundleHasEditableFields } from "./parse";
 import type { NativeMetadataBundle } from "./types";
 import {
   concat,
   extractTransplantableSegments,
   insertAfterAppSegments,
+  isExifApp1,
+  scanJpegSegments,
   stripMetadataSegments,
 } from "./segments";
 
@@ -32,9 +35,10 @@ function fromDataUrl(dataUrl: string): Uint8Array {
   return base64ToBinary(dataUrl.slice(comma + 1));
 }
 
-type ExifDict = Record<string, Record<number, string | number>>;
+type ExifDict = Record<string, Record<number, string | number | [number, number]>>;
 
-function minimalJpeg(): Uint8Array {
+/** Minimal valid JPEG used as ExifTool metadata canvas (HEIC → segment materialize). */
+export function minimalJpeg(): Uint8Array {
   function seg(marker: number, payload: Uint8Array): Uint8Array {
     const out = new Uint8Array(2 + 2 + payload.length);
     out[0] = 0xff;
@@ -67,23 +71,30 @@ function wrapApp1Segment(exifPayload: Uint8Array): Uint8Array {
   return out;
 }
 
-function exifDictFromBundle(bundle: NativeMetadataBundle): ExifDict {
+function exifDictFromBundle(bundle: NativeMetadataBundle, injectOppoMarker = true): ExifDict {
   const exifObj: ExifDict = { "0th": {}, Exif: {}, GPS: {} };
-  applyExifOverrides(exifObj, bundle);
+  applyExifOverrides(exifObj, bundle, injectOppoMarker);
   return exifObj;
 }
 
 /** Build raw APP1 payload bytes (Exif\\0\\0 + TIFF) from a metadata bundle. */
-export function buildExifApp1PayloadFromBundle(bundle: NativeMetadataBundle): Uint8Array | null {
+export function buildExifApp1PayloadFromBundle(
+  bundle: NativeMetadataBundle,
+  injectOppoMarker = true,
+): Uint8Array | null {
   try {
-    return binaryStringToUint8(piexif.dump(exifDictFromBundle(bundle)));
+    return binaryStringToUint8(piexif.dump(exifDictFromBundle(bundle, injectOppoMarker)));
   } catch {
     return null;
   }
 }
 
-function insertExifFromBundle(jpeg: Uint8Array, bundle: NativeMetadataBundle): Uint8Array {
-  const payload = buildExifApp1PayloadFromBundle(bundle);
+function insertExifFromBundle(
+  jpeg: Uint8Array,
+  bundle: NativeMetadataBundle,
+  injectOppoMarker = true,
+): Uint8Array {
+  const payload = buildExifApp1PayloadFromBundle(bundle, injectOppoMarker);
   if (!payload) return jpeg;
   return insertAfterAppSegments(stripMetadataSegments(jpeg), [wrapApp1Segment(payload)]);
 }
@@ -98,7 +109,11 @@ function parseRational(value: string): [number, number] | string {
   return value;
 }
 
-function applyExifOverrides(exifObj: ExifDict, bundle: NativeMetadataBundle): void {
+function applyExifOverrides(
+  exifObj: ExifDict,
+  bundle: NativeMetadataBundle,
+  injectOppoMarker = true,
+): void {
   const map: Record<string, [string, number]> = {
     Make: ["0th", piexif.ImageIFD.Make as number],
     Model: ["0th", piexif.ImageIFD.Model as number],
@@ -138,8 +153,32 @@ function applyExifOverrides(exifObj: ExifDict, bundle: NativeMetadataBundle): vo
     }
   }
 
+  const imageIfd = piexif.ImageIFD as Record<string, number>;
+  const exifIfd = piexif.ExifIFD as Record<string, number>;
+  const gpsIfd = piexif.GPSIFD as Record<string, number>;
+  for (const [key, value] of Object.entries(bundle.exif)) {
+    if (map[key]) continue;
+    if (imageIfd[key] !== undefined) {
+      if (!exifObj["0th"]) exifObj["0th"] = {};
+      exifObj["0th"][imageIfd[key]] = value;
+    } else if (exifIfd[key] !== undefined) {
+      if (!exifObj.Exif) exifObj.Exif = {};
+      exifObj.Exif[exifIfd[key]] = value;
+    } else if (gpsIfd[key] !== undefined) {
+      if (!exifObj.GPS) exifObj.GPS = {};
+      exifObj.GPS[gpsIfd[key]] = value;
+    }
+  }
+
   if (!exifObj.Exif) exifObj.Exif = {};
-  exifObj.Exif[piexif.ExifIFD.UserComment as number] = OPPO_USER_COMMENT;
+  if (injectOppoMarker) {
+    exifObj.Exif[piexif.ExifIFD.UserComment as number] = OPPO_USER_COMMENT;
+  }
+}
+
+export interface ApplyMetadataOptions {
+  /** When false, skip OPPO UserComment (copy-img-meta mode). Default true. */
+  injectOppoMarker?: boolean;
 }
 
 /** Apply native metadata onto cover JPEG bytes (EXIF/IPTC transplant). */
@@ -147,7 +186,9 @@ export function applyNativeMetadata(
   coverJpeg: Uint8Array,
   bundle: NativeMetadataBundle | undefined,
   referenceJpeg?: Uint8Array,
+  options: ApplyMetadataOptions = {},
 ): Uint8Array {
+  const injectOppoMarker = options.injectOppoMarker !== false;
   let working = stripMetadataSegments(coverJpeg);
   const toInsert: Uint8Array[] = [];
 
@@ -172,16 +213,16 @@ export function applyNativeMetadata(
         } catch {
           exifObj = { "0th": {}, Exif: {}, GPS: {} };
         }
-        applyExifOverrides(exifObj, bundle);
+        applyExifOverrides(exifObj, bundle, injectOppoMarker);
         const outUrl = piexif.insert(piexif.dump(exifObj), dataUrl);
         working = fromDataUrl(outUrl);
       } catch {
         // Keep segment-only transplant from reference.
       }
     } else {
-      working = insertExifFromBundle(working, bundle);
+      working = insertExifFromBundle(working, bundle, injectOppoMarker);
     }
-  } else if (!referenceJpeg) {
+  } else if (!referenceJpeg && injectOppoMarker) {
     try {
       const dataUrl = toDataUrl(working);
       const exifObj: ExifDict = {
@@ -197,6 +238,71 @@ export function applyNativeMetadata(
   return working;
 }
 
+function patchExifFromBundle(
+  jpeg: Uint8Array,
+  bundle: NativeMetadataBundle,
+  injectOppoMarker = false,
+): Uint8Array {
+  const hasExif = scanJpegSegments(jpeg).some((s) => isExifApp1(s));
+  if (!hasExif) {
+    const payload = buildExifApp1PayloadFromBundle(bundle, injectOppoMarker);
+    if (!payload) return jpeg;
+    return insertAfterAppSegments(jpeg, [wrapApp1Segment(payload)]);
+  }
+
+  try {
+    const dataUrl = toDataUrl(jpeg);
+    const exifObj = piexif.load(dataUrl) as ExifDict;
+    applyExifOverrides(exifObj, bundle, injectOppoMarker);
+    return fromDataUrl(piexif.insert(piexif.dump(exifObj), dataUrl));
+  } catch {
+    if (bundle.exif.Make || bundle.exif.Model) {
+      return ensureIfd0MakeModel(jpeg, bundle.exif.Make, bundle.exif.Model);
+    }
+    return jpeg;
+  }
+}
+
+/** Force IFD0 Make/Model via piexif (ColorOS Hasselblad watermark reads 0th IFD). */
+export function ensureIfd0MakeModel(
+  jpeg: Uint8Array,
+  make?: string,
+  model?: string,
+): Uint8Array {
+  if (!make && !model) return jpeg;
+
+  const exifFields: Record<string, string> = {};
+  if (make) exifFields.Make = make;
+  if (model) exifFields.Model = model;
+
+  const hasExif = scanJpegSegments(jpeg).some((s) => isExifApp1(s));
+  if (!hasExif) {
+    const payload = buildExifApp1PayloadFromBundle(
+      { exif: exifFields, iptc: {} },
+      false,
+    );
+    if (!payload) return jpeg;
+    return insertAfterAppSegments(jpeg, [wrapApp1Segment(payload)]);
+  }
+
+  try {
+    const exifObj = piexif.load(toDataUrl(jpeg));
+    if (!exifObj["0th"]) exifObj["0th"] = {};
+    const imageIfd = piexif.ImageIFD as Record<string, number>;
+    if (make) exifObj["0th"][imageIfd.Make] = make;
+    if (model) exifObj["0th"][imageIfd.Model] = model;
+    const dumped = piexif.dump(exifObj);
+    return fromDataUrl(piexif.insert(dumped, toDataUrl(jpeg)));
+  } catch {
+    const payload = buildExifApp1PayloadFromBundle(
+      { exif: exifFields, iptc: {} },
+      false,
+    );
+    if (!payload) return jpeg;
+    return insertAfterAppSegments(stripMetadataSegments(jpeg), [wrapApp1Segment(payload)]);
+  }
+}
+
 /**
  * Build a minimal JPEG whose EXIF APP1 carries parsed field values.
  * Used for HEIC/PNG/WebP references where segment copy from source is impossible.
@@ -205,6 +311,15 @@ export function buildSyntheticReferenceJpeg(bundle: NativeMetadataBundle): Uint8
   const payload = buildExifApp1PayloadFromBundle(bundle);
   if (!payload) return minimalJpeg();
   return insertAfterAppSegments(minimalJpeg(), [wrapApp1Segment(payload)]);
+}
+
+/** Patch copied JPEG with user-edited EXIF from Feature 2 metadata panel. */
+export function applySourceMetadataEdits(
+  jpeg: Uint8Array,
+  bundle: NativeMetadataBundle,
+): Uint8Array {
+  if (!bundleHasEditableFields(bundle)) return jpeg;
+  return patchExifFromBundle(jpeg, bundle, false);
 }
 
 export { concat };
