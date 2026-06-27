@@ -33,6 +33,5 @@ env/
 .vscode/
 .idea/
 
-# OS
-.DS_Store
-Thumbs.db
+# Bundled portable tools (see scripts/setup-exiftool.ps1)
+tools/exiftool/

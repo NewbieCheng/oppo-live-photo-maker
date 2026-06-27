@@ -30,13 +30,26 @@ EXIFTOOL_CONFIG_NAME = "exiftool_oppo.config"
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
+def _repo_tools_exiftool() -> Path | None:
+    here = Path(__file__).resolve().parent
+    repo_root = here.parent.parent  # src/oppo_live_photo -> repo root
+    path = repo_root / "tools" / "exiftool" / "exiftool.exe"
+    if path.is_file():
+        return path
+    return None
+
+
 def _find_exiftool() -> str:
     exe = shutil.which("exiftool")
-    if not exe:
-        raise RuntimeError(
-            "exiftool not found. Install from https://exiftool.org and add to PATH."
-        )
-    return exe
+    if exe:
+        return exe
+    bundled = _repo_tools_exiftool()
+    if bundled is not None:
+        return str(bundled)
+    raise RuntimeError(
+        "exiftool not found. Run scripts/setup-exiftool.ps1 or install from "
+        "https://exiftool.org and add to PATH."
+    )
 
 
 def _config_path() -> str:

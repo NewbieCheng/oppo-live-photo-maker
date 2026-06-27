@@ -6,7 +6,7 @@ export {
   emptyBundle,
   mergeBundles,
 } from "./fields";
-export { parseReferenceImage, parseReferenceImageSync, parseFromTagMap, flattenExifReaderTags } from "./parse";
+export { parseReferenceImage, parseReferenceImageSync, parseFromTagMap, flattenExifReaderTags, bundleHasEditableFields } from "./parse";
 export type { ParseSummary } from "./parse";
 export {
   detectReferenceFormat,
@@ -21,4 +21,4 @@ export {
   referenceJpegForMux,
   type LoadedReferenceImage,
 } from "./referenceLoad";
-export { applyNativeMetadata, OPPO_USER_COMMENT } from "./apply";
+export { applyNativeMetadata, buildSyntheticReferenceJpeg, OPPO_USER_COMMENT } from "./apply";

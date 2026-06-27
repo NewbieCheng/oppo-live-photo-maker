@@ -6,7 +6,8 @@ import {
   isJpegFormat,
   type ReferenceImageFormat,
 } from "./imageFormat";
-import { parseFromTagMap, type ParseSummary } from "./parse";
+import { buildSyntheticReferenceJpeg } from "./apply";
+import { bundleHasEditableFields, parseFromTagMap, type ParseSummary } from "./parse";
 import type { NativeMetadataBundle } from "./types";
 
 export interface LoadedReferenceImage {
@@ -57,9 +58,12 @@ export async function loadReferenceImageFile(file: File): Promise<LoadedReferenc
     }
   }
 
-  if (!bundle) {
+  if (!bundle || !bundleHasEditableFields(bundle)) {
     throw new Error(
-      `${formatLabel(format)} 中未找到可读取的 EXIF/IPTC 元数据。请换一张机内直出的原图试试。`,
+      `${formatLabel(format)} 中未找到可读取的 EXIF/IPTC 元数据。` +
+        (isHeicFamily(format)
+          ? " HEIC 在浏览器内只能移植已解析的字段（非 exiftool 级全量复制）；请确认是机内直出原图，或使用桌面版 + exiftool。"
+          : " 请换一张机内直出的原图试试。"),
     );
   }
 
@@ -113,6 +117,10 @@ function summarizeBundle(
 }
 
 export function referenceJpegForMux(loaded: LoadedReferenceImage | null): Uint8Array | undefined {
-  if (!loaded?.useSegmentTransplant) return undefined;
-  return loaded.originalBytes;
+  if (!loaded) return undefined;
+  if (loaded.useSegmentTransplant) return loaded.originalBytes;
+  if (bundleHasEditableFields(loaded.bundle)) {
+    return buildSyntheticReferenceJpeg(loaded.bundle);
+  }
+  return undefined;
 }

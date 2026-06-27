@@ -191,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
                 clip,
                 output,
                 presentation_timestamp_us=presentation_ts,
-                reference_jpg=reference if cover_mode == "video" else None,
+                reference_jpg=reference,
                 metadata_overrides=meta_for_mux,
             )
         except Exception as e:

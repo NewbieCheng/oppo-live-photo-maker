@@ -12,8 +12,6 @@ const MOTION_XMP_MARKERS = [
   "OLivePhotoVersion",
 ];
 
-const EXIF_GROUPS = new Set(["file", "exif", "iptc", "xmp", "gps", "mpf", "icc", "interop"]);
-
 const EXIF_ALIASES: Record<string, string[]> = {
   Make: ["Make"],
   Model: ["Model"],
@@ -90,19 +88,34 @@ function loadRawTags(bytes: Uint8Array): Record<string, unknown> {
   return ExifReader.load(buffer, { expanded: true }) as Record<string, unknown>;
 }
 
-/** Flatten exifreader expanded groups into a single tag map. */
+function isTagObject(value: unknown): value is TagMap[string] {
+  return !!value && typeof value === "object" && ("description" in value || "value" in value);
+}
+
+function isTagGroup(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || isTagObject(value)) return false;
+  return Object.values(value).some(isTagObject);
+}
+
+/** Flatten exifreader expanded groups (exif, gps, composite, quicktime, …) into one map. */
 export function flattenExifReaderTags(raw: Record<string, unknown>): TagMap {
   const out: TagMap = {};
   for (const [key, value] of Object.entries(raw)) {
-    if (EXIF_GROUPS.has(key) && value && typeof value === "object" && !("description" in value)) {
-      for (const [inner, tag] of Object.entries(value as Record<string, unknown>)) {
-        if (tag && typeof tag === "object") out[inner] = tag as TagMap[string];
+    if (key === "Thumbnail") continue;
+    if (isTagGroup(value)) {
+      for (const [inner, tag] of Object.entries(value)) {
+        if (isTagObject(tag)) out[inner] = tag;
       }
-    } else if (value && typeof value === "object" && "description" in value) {
-      out[key] = value as TagMap[string];
+      continue;
     }
+    if (isTagObject(value)) out[key] = value;
   }
   return out;
+}
+
+/** True when the bundle contains user-visible editable fields. */
+export function bundleHasEditableFields(bundle: NativeMetadataBundle): boolean {
+  return Object.keys(bundle.exif).length + Object.keys(bundle.iptc).length > 0;
 }
 
 function parseFromTags(tags: TagMap): NativeMetadataBundle {
@@ -133,6 +146,20 @@ function parseFromTags(tags: TagMap): NativeMetadataBundle {
       const val = tagValue(tag);
       if (val !== undefined) exif[name] = val;
     }
+  }
+
+  // Composite GPS (common in HEIC / phone exports).
+  if (!exif.GPSLatitude) {
+    const lat = pickTag(tags, ["GPSLatitude", "Composite:GPSLatitude"]);
+    if (lat) exif.GPSLatitude = lat;
+  }
+  if (!exif.GPSLongitude) {
+    const lon = pickTag(tags, ["GPSLongitude", "Composite:GPSLongitude"]);
+    if (lon) exif.GPSLongitude = lon;
+  }
+  if (!exif.GPSAltitude) {
+    const alt = pickTag(tags, ["GPSAltitude", "Composite:GPSAltitude"]);
+    if (alt) exif.GPSAltitude = alt;
   }
 
   return {

@@ -113,7 +113,10 @@ def _pick_tags(record: dict, keys: tuple[str, ...]) -> dict[str, str]:
 
 
 def parse_reference_image(path: str | Path) -> NativeMetadataBundle:
-    """Read editable EXIF/IPTC and optional presentation timestamp from a JPEG."""
+    """Read editable EXIF/IPTC and optional presentation timestamp via exiftool.
+
+    Supports JPEG, HEIC/HEIF, PNG, WebP, and other formats exiftool reads.
+    """
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(path)

@@ -40,6 +40,16 @@ ffmpeg -version
 exiftool -ver
 ```
 
+或运行环境检查脚本（Windows / macOS / Linux）：
+
+```cmd
+powershell -ExecutionPolicy Bypass -File scripts/check-env.ps1
+```
+
+```bash
+bash scripts/check-env.sh
+```
+
 ### 2. Python 包
 
 ```cmd
@@ -96,6 +106,8 @@ python main.py
 - 同时写入 Google MotionPhoto 与 MicroVideo（旧标准）XMP 标签
 
 **在线版**：步骤 2「参考图」→ 步骤 3「原生数据」中上传、编辑。
+
+**网页版 HEIC 说明**：浏览器无法运行 exiftool，HEIC 参考图会先解析可见字段（Make/Model/GPS 等），再合成 JPEG EXIF 段写入输出；**无法**像桌面版 `copy-img-meta --exclude-xmp` 那样 100% 复制 MakerNote、ICC 等全部二进制块。机内 JPG 参考图可走完整 APP1 段移植。需要全量元数据时请用桌面版 CLI/GUI + exiftool。
 
 ### 命令行
 
