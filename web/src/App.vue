@@ -17,26 +17,33 @@ import { buildOppoMotionPhoto } from "./lib/muxer";
 import {
   computePresentationTimestampUs,
   emptyBundle,
+  loadReferenceImageFile,
   mergeBundles,
-  parseReferenceImageSync,
+  referenceJpegForMux,
+  REFERENCE_IMAGE_ACCEPT,
   type CoverMode,
+  type LoadedReferenceImage,
   type NativeMetadataBundle,
 } from "./lib/metadata";
 
-const STEP_LABELS = ["视频", "参考图", "原生数据", "导出"];
+const STEP_LABELS = ["原生图", "视频", "元数据", "导出"];
 
 const step = ref(1);
 const file = ref<File | null>(null);
 const info = ref<VideoInfo | null>(null);
 const previewUrl = ref("");
-const dragOver = ref(false);
 
-const referenceFile = ref<File | null>(null);
-const referenceBytes = ref<Uint8Array | null>(null);
-const referencePreviewUrl = ref("");
-const referenceBundle = ref<NativeMetadataBundle | null>(null);
+const loadedReference = ref<LoadedReferenceImage | null>(null);
+const referenceParsing = ref(false);
+const referenceParsingName = ref("");
+const referenceParseError = ref("");
 const metadataEdits = ref<NativeMetadataBundle>(emptyBundle());
 const coverMode = ref<CoverMode>("videoFrame");
+
+const referenceFile = computed(() => loadedReference.value?.file ?? null);
+const referencePreviewUrl = computed(() => loadedReference.value?.previewUrl ?? "");
+const referenceBundle = computed(() => loadedReference.value?.bundle ?? null);
+const parseSummary = computed(() => loadedReference.value?.summary ?? null);
 
 const unsupported = ref<{ reason: string; codec?: string } | null>(null);
 
@@ -79,10 +86,10 @@ const canConvert = computed(
     !!file.value &&
     !!info.value &&
     !unsupported.value &&
-    (coverMode.value !== "referenceImage" || !!referenceFile.value),
+    (coverMode.value !== "referenceImage" || !!loadedReference.value),
 );
 
-function pickFile() {
+function pickVideo() {
   const inp = document.createElement("input");
   inp.type = "file";
   inp.accept = "video/*";
@@ -100,7 +107,6 @@ async function loadFile(f: File) {
   previewUrl.value = URL.createObjectURL(f);
   status.value = "idle";
   statusText.value = "正在读取视频信息…";
-  step.value = 1;
   try {
     const result = await probeAndCheck(f);
     info.value = result.info;
@@ -119,47 +125,52 @@ async function loadFile(f: File) {
   }
 }
 
+function changeVideo() {
+  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
+  previewUrl.value = "";
+  file.value = null;
+  info.value = null;
+  unsupported.value = null;
+  statusText.value = "";
+}
+
 function pickReference() {
   const inp = document.createElement("input");
   inp.type = "file";
-  inp.accept = "image/jpeg,image/jpg,.jpg,.jpeg";
+  inp.accept = REFERENCE_IMAGE_ACCEPT;
   inp.onchange = () => {
     if (inp.files?.[0]) loadReference(inp.files[0]);
   };
   inp.click();
 }
 
-function loadReference(f: File) {
-  if (referencePreviewUrl.value) URL.revokeObjectURL(referencePreviewUrl.value);
-  referenceFile.value = f;
-  referencePreviewUrl.value = URL.createObjectURL(f);
-  f.arrayBuffer().then((buf) => {
-    referenceBytes.value = new Uint8Array(buf);
-    try {
-      referenceBundle.value = parseReferenceImageSync(referenceBytes.value);
-      metadataEdits.value = emptyBundle();
-    } catch (e) {
-      referenceBundle.value = null;
-      errorText.value = `参考图解析失败: ${(e as Error).message}`;
-    }
-  });
+async function loadReference(f: File) {
+  referenceParseError.value = "";
+  referenceParsingName.value = f.name;
+  referenceParsing.value = true;
+  clearReference(false);
+
+  try {
+    const loaded = await loadReferenceImageFile(f);
+    loadedReference.value = loaded;
+    metadataEdits.value = emptyBundle();
+  } catch (e) {
+    referenceParseError.value = (e as Error).message;
+    loadedReference.value = null;
+  } finally {
+    referenceParsing.value = false;
+    referenceParsingName.value = "";
+  }
 }
 
-function clearReference() {
-  if (referencePreviewUrl.value) URL.revokeObjectURL(referencePreviewUrl.value);
-  referenceFile.value = null;
-  referenceBytes.value = null;
-  referencePreviewUrl.value = "";
-  referenceBundle.value = null;
+function clearReference(revoke = true) {
+  if (revoke && loadedReference.value?.previewUrl) {
+    URL.revokeObjectURL(loadedReference.value.previewUrl);
+  }
+  loadedReference.value = null;
+  referenceParseError.value = "";
   metadataEdits.value = emptyBundle();
   coverMode.value = "videoFrame";
-}
-
-function onDrop(e: DragEvent) {
-  e.preventDefault();
-  dragOver.value = false;
-  const f = e.dataTransfer?.files?.[0];
-  if (f) loadFile(f);
 }
 
 function reloadMetadataFromReference() {
@@ -172,8 +183,17 @@ function buildMetadataForMux(): NativeMetadataBundle | undefined {
   const hasData =
     Object.keys(merged.exif).length ||
     Object.keys(merged.iptc).length ||
-    referenceBytes.value;
+    loadedReference.value;
   return hasData ? merged : undefined;
+}
+
+function referenceCoverBlob(): Blob {
+  const loaded = loadedReference.value;
+  if (!loaded) throw new Error("未上传参考图");
+  if (loaded.jpegBytes) {
+    return new Blob([loaded.jpegBytes.slice()], { type: "image/jpeg" });
+  }
+  return loaded.file;
 }
 
 function resetResult() {
@@ -206,8 +226,8 @@ async function convert() {
     statusText.value = "[1/3] 正在准备封面…";
     progress.value = 0;
     const cover =
-      coverMode.value === "referenceImage" && referenceFile.value
-        ? await loadReferenceCover(referenceFile.value, { longEdge: longEdge.value })
+      coverMode.value === "referenceImage" && loadedReference.value
+        ? await loadReferenceCover(referenceCoverBlob(), { longEdge: longEdge.value })
         : await extractCoverWebCodecs(file.value, {
             timestamp: coverTime.value,
             longEdge: longEdge.value,
@@ -230,7 +250,7 @@ async function convert() {
     const livePhoto = buildOppoMotionPhoto(cover, clip, {
       presentationTimestampUs: presentationTs,
       nativeMetadata: meta,
-      referenceJpeg: referenceBytes.value ?? undefined,
+      referenceJpeg: referenceJpegForMux(loadedReference.value),
     });
 
     const blob = new Blob([livePhoto.buffer as ArrayBuffer], { type: "image/jpeg" });
@@ -255,7 +275,7 @@ watch(referenceFile, (f) => {
 
 onBeforeUnmount(() => {
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
-  if (referencePreviewUrl.value) URL.revokeObjectURL(referencePreviewUrl.value);
+  if (loadedReference.value?.previewUrl) URL.revokeObjectURL(loadedReference.value.previewUrl);
   if (resultUrl.value) URL.revokeObjectURL(resultUrl.value);
 });
 
@@ -275,7 +295,7 @@ const AUTHOR_URL = "https://github.com/NewbieCheng";
           <h1>实况图制作</h1>
         </div>
         <p class="tagline">
-          视频 → OPPO 相册可识别的 MotionPhoto · 支持原生 EXIF 移植 ·
+          机内原图 → 视频 → OPPO 相册可识别的 MotionPhoto · 支持 HEIC/JPG 元数据解析 ·
           <strong>全程本地处理</strong>
         </p>
       </div>
@@ -296,24 +316,6 @@ const AUTHOR_URL = "https://github.com/NewbieCheng";
         <p>请使用 Chrome / Edge 94+、Safari 16.4+ 或 Firefox 130+。</p>
       </section>
 
-      <section
-        v-else-if="!file"
-        class="drop-target landing-drop"
-        :class="{ over: dragOver }"
-        role="button"
-        tabindex="0"
-        @click="pickFile"
-        @keydown.enter="pickFile"
-        @dragenter.prevent="dragOver = true"
-        @dragover.prevent="dragOver = true"
-        @dragleave.prevent="dragOver = false"
-        @drop="onDrop"
-      >
-        <div class="drop-target-icon" aria-hidden="true">▷</div>
-        <div class="drop-target-title">拖入视频，或点击选择</div>
-        <div class="drop-target-hint">MP4 · MOV · MKV · WebM · 文件不会离开本机</div>
-      </section>
-
       <div v-else class="workspace">
         <StepIndicator :current="step" :labels="STEP_LABELS" />
 
@@ -322,19 +324,28 @@ const AUTHOR_URL = "https://github.com/NewbieCheng";
             ← 上一步
           </button>
           <span class="step-label">{{ STEP_LABELS[step - 1] }}</span>
-          <button
-            type="button"
-            class="btn"
-            :disabled="step >= 4 || !!unsupported"
-            @click="step++"
-          >
+          <button type="button" class="btn" :disabled="step >= 4" @click="step++">
             下一步 →
           </button>
         </nav>
 
         <div class="step-content">
-          <VideoStep
+          <ReferenceStep
             v-show="step === 1"
+            :reference-file="referenceFile"
+            :reference-preview-url="referencePreviewUrl"
+            :parsing="referenceParsing"
+            :parsing-name="referenceParsingName"
+            :parse-error="referenceParseError"
+            :parse-summary="parseSummary"
+            v-model:cover-mode="coverMode"
+            @pick-reference="pickReference"
+            @clear-reference="clearReference()"
+            @drop-reference="loadReference"
+          />
+
+          <VideoStep
+            v-show="step === 2"
             :file="file"
             :preview-url="previewUrl"
             :info="info"
@@ -344,16 +355,9 @@ const AUTHOR_URL = "https://github.com/NewbieCheng";
             v-model:cover-time="coverTime"
             v-model:long-edge="longEdge"
             v-model:audio-kbps="audioKbps"
-            @change-video="file = null; info = null; unsupported = null"
-          />
-
-          <ReferenceStep
-            v-show="step === 2"
-            :reference-file="referenceFile"
-            :reference-preview-url="referencePreviewUrl"
-            v-model:cover-mode="coverMode"
-            @pick-reference="pickReference"
-            @clear-reference="clearReference"
+            @pick-video="pickVideo"
+            @drop-video="loadFile"
+            @change-video="changeVideo"
           />
 
           <MetadataEditor
@@ -424,7 +428,7 @@ const AUTHOR_URL = "https://github.com/NewbieCheng";
 }
 .tagline {
   margin: 0;
-  max-width: 520px;
+  max-width: 560px;
   font-size: 14px;
   color: var(--text-soft);
   line-height: 1.65;
@@ -451,9 +455,6 @@ const AUTHOR_URL = "https://github.com/NewbieCheng";
 
 .main {
   flex: 1;
-}
-.landing-drop {
-  margin-top: 12px;
 }
 
 .workspace {

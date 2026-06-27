@@ -1,38 +1,64 @@
 <script setup lang="ts">
 import type { CoverMode } from "../lib/metadata/types";
+import type { ParseSummary } from "../lib/metadata/parse";
 
 defineProps<{
   referenceFile: File | null;
   referencePreviewUrl: string;
   coverMode: CoverMode;
+  parsing: boolean;
+  parsingName: string;
+  parseError: string;
+  parseSummary: ParseSummary | null;
 }>();
 
 const emit = defineEmits<{
   pickReference: [];
   clearReference: [];
+  dropReference: [File];
   "update:coverMode": [CoverMode];
 }>();
+
+function onDrop(e: DragEvent) {
+  e.preventDefault();
+  const f = e.dataTransfer?.files?.[0];
+  if (f) emit("dropReference", f);
+}
 </script>
 
 <template>
   <section class="panel ref-step">
-    <p class="panel-title">参考原生图</p>
+    <p class="panel-title">上传机内原图</p>
     <p class="panel-desc">
-      可选。上传相机或 OPPO 相册里的 JPEG，把 EXIF / IPTC 移植到输出的实况图
-      （等同 <code>copy-img-meta --exclude-xmp</code>）。
+      第一步：上传手机相册里的<strong>普通照片</strong>（机内直出的 JPG / HEIC 等）。
+      工具会实时读取 Make、Model、拍摄时间、GPS 等 EXIF，并在导出时移植到实况图。
     </p>
 
     <div
-      v-if="!referenceFile"
+      v-if="!referenceFile && !parsing"
       class="drop-target inner-drop"
       role="button"
       tabindex="0"
       @click="emit('pickReference')"
       @keydown.enter="emit('pickReference')"
+      @dragenter.prevent
+      @dragover.prevent
+      @drop="onDrop"
     >
       <div class="drop-target-icon" aria-hidden="true">◫</div>
-      <div class="drop-target-title">选择参考图</div>
-      <div class="drop-target-hint">.jpg / .jpeg · 不上传服务器</div>
+      <div class="drop-target-title">拖入或选择机内原图</div>
+      <div class="drop-target-hint">JPG · HEIC · HEIF · PNG · WebP · 不上传服务器</div>
+    </div>
+
+    <div v-else-if="parsing" class="parse-status" aria-live="polite">
+      <span class="spinner" aria-hidden="true" />
+      <span>正在解析 {{ parsingName || referenceFile?.name }} …</span>
+    </div>
+
+    <div v-else-if="parseError" class="alert alert-warn">
+      <strong>解析失败</strong>
+      <p>{{ parseError }}</p>
+      <button type="button" class="btn btn-ghost" @click="emit('pickReference')">重选图片</button>
     </div>
 
     <div v-else class="ref-preview">
@@ -40,7 +66,15 @@ const emit = defineEmits<{
         <img :src="referencePreviewUrl" alt="参考图预览" />
       </div>
       <div class="ref-meta">
-        <p class="ref-name">{{ referenceFile.name }}</p>
+        <p class="ref-name">{{ referenceFile?.name }}</p>
+        <div v-if="parseSummary" class="parse-chips">
+          <span class="chip">{{ parseSummary.formatLabel }}</span>
+          <span class="chip">{{ parseSummary.fieldCount }} 项元数据</span>
+          <span v-if="parseSummary.make" class="chip chip-accent">{{ parseSummary.make }}</span>
+          <span v-if="parseSummary.model" class="chip chip-accent">{{ parseSummary.model }}</span>
+          <span v-if="parseSummary.dateTime" class="chip">{{ parseSummary.dateTime }}</span>
+          <span v-if="parseSummary.hasGps" class="chip">GPS</span>
+        </div>
         <div class="ref-actions">
           <button type="button" class="btn btn-ghost" @click="emit('pickReference')">更换</button>
           <button type="button" class="btn btn-ghost" @click="emit('clearReference')">移除</button>
@@ -94,6 +128,29 @@ const emit = defineEmits<{
   margin-top: 0;
   padding: 40px 20px;
 }
+.parse-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 24px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-soft);
+  font-size: 14px;
+}
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border);
+  border-top-color: var(--live);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 .ref-preview {
   display: flex;
   gap: 20px;
@@ -108,10 +165,29 @@ const emit = defineEmits<{
   object-fit: cover;
 }
 .ref-name {
-  margin: 0 0 12px;
+  margin: 0 0 10px;
   font-size: 14px;
   word-break: break-all;
   color: var(--text);
+}
+.parse-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.chip {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text-soft);
+}
+.chip-accent {
+  border-color: var(--live);
+  color: var(--live);
+  background: var(--live-dim);
 }
 .ref-actions {
   display: flex;
@@ -166,5 +242,9 @@ const emit = defineEmits<{
 .mode-copy small {
   font-size: 12px;
   color: var(--text-faint);
+}
+.alert p {
+  margin: 6px 0 10px;
+  font-size: 13px;
 }
 </style>

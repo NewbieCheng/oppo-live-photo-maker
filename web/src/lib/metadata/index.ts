@@ -6,5 +6,19 @@ export {
   emptyBundle,
   mergeBundles,
 } from "./fields";
-export { parseReferenceImage, parseReferenceImageSync } from "./parse";
+export { parseReferenceImage, parseReferenceImageSync, parseFromTagMap, flattenExifReaderTags } from "./parse";
+export type { ParseSummary } from "./parse";
+export {
+  detectReferenceFormat,
+  formatLabel,
+  isJpegFormat,
+  isHeicFamily,
+  REFERENCE_IMAGE_ACCEPT,
+  type ReferenceImageFormat,
+} from "./imageFormat";
+export {
+  loadReferenceImageFile,
+  referenceJpegForMux,
+  type LoadedReferenceImage,
+} from "./referenceLoad";
 export { applyNativeMetadata, OPPO_USER_COMMENT } from "./apply";

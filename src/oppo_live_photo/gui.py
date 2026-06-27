@@ -412,7 +412,7 @@ class SingleTab(QtWidgets.QWidget):
     def _pick_reference(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "选择参考原生图", "",
-            "图片 (*.jpg *.jpeg *.JPG *.JPEG);;所有文件 (*.*)"
+            "图片 (*.jpg *.jpeg *.heic *.heif *.png *.webp *.JPG *.JPEG *.HEIC *.HEIF);;所有文件 (*.*)"
         )
         if path:
             self.load_reference(Path(path))

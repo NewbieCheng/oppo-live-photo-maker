@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import type { VideoInfo } from "../lib/webcodecs";
 
 const props = defineProps<{
-  file: File;
+  file: File | null;
   previewUrl: string;
   info: VideoInfo | null;
   unsupported: { reason: string; codec?: string } | null;
@@ -15,6 +15,8 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  pickVideo: [];
+  dropVideo: [File];
   changeVideo: [];
   "update:start": [number];
   "update:duration": [number];
@@ -22,6 +24,14 @@ const emit = defineEmits<{
   "update:longEdge": [number];
   "update:audioKbps": [number];
 }>();
+
+function onDrop(e: DragEvent) {
+  e.preventDefault();
+  const f = e.dataTransfer?.files?.[0];
+  if (f?.type.startsWith("video/") || f?.name.match(/\.(mp4|mov|mkv|webm|m4v)$/i)) {
+    if (f) emit("dropVideo", f);
+  }
+}
 
 const videoEl = ref<HTMLVideoElement | null>(null);
 const showAdvanced = ref(false);
@@ -59,6 +69,23 @@ watch(
 
 <template>
   <section class="panel video-step">
+    <div
+      v-if="!file"
+      class="drop-target inner-drop"
+      role="button"
+      tabindex="0"
+      @click="emit('pickVideo')"
+      @keydown.enter="emit('pickVideo')"
+      @dragenter.prevent
+      @dragover.prevent
+      @drop="onDrop"
+    >
+      <div class="drop-target-icon" aria-hidden="true">▷</div>
+      <div class="drop-target-title">拖入视频，或点击选择</div>
+      <div class="drop-target-hint">MP4 · MOV · MKV · WebM · 文件不会离开本机</div>
+    </div>
+
+    <template v-else>
     <div class="head">
       <div>
         <p class="panel-title">选取片段</p>
@@ -158,6 +185,7 @@ watch(
         </div>
       </details>
     </template>
+    </template>
   </section>
 </template>
 
@@ -166,6 +194,10 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+.inner-drop {
+  margin-top: 0;
+  padding: 40px 20px;
 }
 .head {
   display: flex;
