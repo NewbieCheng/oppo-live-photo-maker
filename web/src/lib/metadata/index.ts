@@ -25,10 +25,12 @@ export { applyNativeMetadata, buildSyntheticReferenceJpeg, applySourceMetadataEd
 export { copyImageMetadata, type CopyMetadataOptions, type CopyMetadataResult, OPPO_COPY_PRESET } from "./copyMeta";
 export {
   computeDirtyKeys,
+  dirtyBundleForWrite,
   hasMetadataEdits,
   sourceEditsForCopy,
   buildEffectiveSourceBundle,
 } from "./sourceMetadataEdits";
+export { editSourceMetadata, editFormatHint, type EditMetadataResult } from "./editMetadata";
 export {
   buildTagsFromFileArgs,
   validateCopyOptions as validateCopyMetadataOptions,

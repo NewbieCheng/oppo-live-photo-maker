@@ -474,6 +474,11 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <p class="workflow-hint">
+      推荐流程：目标图使用普通封面 JPG（勿直接选 live.jpg），复制元数据后再用功能一合成 MotionPhoto。
+      若目标已是 live.jpg，请使用 OPPO 预设（排除 XMP）。
+    </p>
+
     <div class="copy-actions">
       <div class="preset-compact" role="group" aria-label="复制预设">
         <button
@@ -701,6 +706,12 @@ onBeforeUnmount(() => {
   line-height: 1.45;
   color: var(--warn-fg, #8a5a00);
   background: var(--warn-bg, rgba(255, 180, 0, 0.12));
+}
+.workflow-hint {
+  margin: 0 0 12px;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--muted, #666);
 }
 .download {
   text-decoration: none;

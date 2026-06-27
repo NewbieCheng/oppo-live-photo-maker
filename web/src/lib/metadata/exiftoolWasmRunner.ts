@@ -269,6 +269,40 @@ export async function warmupExiftoolRuntime(): Promise<void> {
   }
 }
 
+export async function writeMetadataWithExiftool(
+  file: File,
+  writeArgs: string[],
+): Promise<Uint8Array> {
+  const { perl, fileSystem } = await getZeroPerl();
+  stdout.clear();
+  stderr.clear();
+  await perl.reset();
+
+  const ext = file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")) : ".jpg";
+  const inPath = `/in_${vfsBasename(file.name)}`;
+  const outPath = `/out_${crypto.randomUUID().replace(/-/g, "")}${ext}`;
+  const tempPaths = [inPath, outPath];
+
+  try {
+    fileSystem.addFile(inPath, file);
+    const args = [...writeArgs, "-o", outPath, inPath];
+    const result = await perl.runFile("/exiftool", args);
+    perl.flush();
+
+    const stderrText = stderr.toString();
+    if (!result.success || result.exitCode !== 0) {
+      throw new Error(perl.getLastError() || stderrText || "metadata write failed");
+    }
+    if (stderrText.trim()) {
+      throw new Error(stderrText);
+    }
+
+    return readFileBytes(fileSystem, outPath);
+  } finally {
+    cleanupPaths(fileSystem, tempPaths);
+  }
+}
+
 export async function disposeWasmRunner(): Promise<void> {
   const perl = cachedPerlRef?.deref();
   if (perl) {

@@ -44,6 +44,10 @@ function hasMpfApp2(jpeg: Uint8Array): boolean {
   return false;
 }
 
+export function hasMpfApp2Segment(jpeg: Uint8Array): boolean {
+  return hasMpfApp2(jpeg);
+}
+
 export function validateColorOsExif(
   jpeg: Uint8Array,
   tags: TagMap = {},
@@ -113,6 +117,7 @@ export function needsColorOsExifResync(
     return true;
   }
   if (options.requireMakerNotes && !hasMakerNotesInTags(tags)) return true;
+  if (hasMpfApp2(jpeg)) return true;
   return false;
 }
 

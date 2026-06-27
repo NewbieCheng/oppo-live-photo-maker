@@ -163,6 +163,23 @@ export function stripMetadataForCopy(
   return jpeg;
 }
 
+/** Remove APP2 MPF segments (dest cover JPGs often carry MPF; OPPO originals typically do not). */
+export function stripMpfApp2(jpeg: Uint8Array): Uint8Array {
+  if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
+    throw new Error("Not a JPEG: missing SOI marker");
+  }
+  const out: number[] = [0xff, 0xd8];
+  for (const seg of scanJpegSegments(jpeg)) {
+    if (seg.marker === 0xda || seg.marker === 0xd9) {
+      for (let k = seg.start; k < jpeg.length; k++) out.push(jpeg[k]);
+      return new Uint8Array(out);
+    }
+    if (isMpfApp2(seg)) continue;
+    for (let k = seg.start; k < seg.end; k++) out.push(jpeg[k]);
+  }
+  return jpeg;
+}
+
 /** Strip MotionPhoto XMP + all XMP APP1 + MPF (matches mux -XMP:all=), keep EXIF/IPTC. */
 export function stripXmpAndMpf(jpeg: Uint8Array): Uint8Array {
   if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {

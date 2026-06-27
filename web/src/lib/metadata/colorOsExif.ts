@@ -128,6 +128,7 @@ export function needsColorOsExifResync(
     return true;
   }
   if (options.requireMakerNotes && !hasMakerNotesInTags(tags)) return true;
+  if (hasMpfApp2Segment(jpeg)) return true;
   return false;
 }
 

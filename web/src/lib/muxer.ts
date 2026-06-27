@@ -5,19 +5,17 @@
  *
  *   [JPEG:
  *      SOI
- *      APP1 (EXIF — preserve source Make/Model + UserComment = "Oplus_8388608")
+ *      APP1 (EXIF with UserComment = "Oplus_8388608")
  *      APP1 (XMP — GCamera + OpCamera + Container/Item)
  *      APP2 (MPF — NumberOfImages = 1, Baseline MP Primary)
  *      ... rest of original JPEG ...
  *      EOI ]
  *   [ MP4 trailer ]
  *
- * Kept identical to Young-Spark/oppo-live-photo-maker upstream for feature-one reliability,
- * except EXIF camera tags are preserved when present (live-photo-conv / Python mux semantics).
+ * Feature-one (video → live photo) follows Young-Spark/oppo-live-photo-maker upstream.
  */
 
-import piexif from "piexifjs";
-import { insertAfterAppSegments, isExifApp1, scanJpegSegments, stripXmpAndMpf } from "./metadata/segments";
+export { rebuildMotionPhotoXmpInJpeg } from "@shared/motionPhotoXmp";
 
 const enc = new TextEncoder();
 
@@ -69,32 +67,7 @@ function findInsertionPoint(jpeg: Uint8Array): number {
   return lastAppEnd;
 }
 
-function ensureOppoUserComment(jpeg: Uint8Array): Uint8Array {
-  const hasExif = scanJpegSegments(jpeg).some((s) => isExifApp1(s));
-  if (!hasExif) {
-    return insertAfterAppSegments(jpeg, [buildExifApp1()]);
-  }
-
-  try {
-    let binary = "";
-    for (let i = 0; i < jpeg.length; i++) binary += String.fromCharCode(jpeg[i]);
-    const dataUrl = `data:image/jpeg;base64,${btoa(binary)}`;
-    const exifObj = piexif.load(dataUrl);
-    if (!exifObj.Exif) exifObj.Exif = {};
-    exifObj.Exif[piexif.ExifIFD.UserComment] = "ASCII\0\0\0Oplus_8388608";
-    const dumped = piexif.dump(exifObj);
-    const outUrl = piexif.insert(dumped, dataUrl);
-    const comma = outUrl.indexOf(",");
-    const outB64 = outUrl.slice(comma + 1);
-    const raw = atob(outB64);
-    const out = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
-    return out;
-  } catch {
-    return insertAfterAppSegments(jpeg, [buildExifApp1()]);
-  }
-}
-
+/** Strip any existing APP1/APP2 (EXIF/XMP/MPF) segments so re-muxing stays clean. */
 function stripExistingMetadata(jpeg: Uint8Array): Uint8Array {
   if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
     throw new Error("Not a JPEG: missing SOI marker");
@@ -180,7 +153,6 @@ export interface XmpFields {
 
 function buildXmpPacket(fields: XmpFields): string {
   const ts = fields.presentationTimestampUs ?? 0;
-  const tsMicro = ts === 0 ? -1 : ts;
   const len = fields.videoLength;
   return (
     `<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>\n` +
@@ -191,13 +163,9 @@ function buildXmpPacket(fields: XmpFields): string {
     `    xmlns:OpCamera="http://ns.oplus.com/photos/1.0/camera/"\n` +
     `    xmlns:Container="http://ns.google.com/photos/1.0/container/"\n` +
     `    xmlns:Item="http://ns.google.com/photos/1.0/container/item/"\n` +
-    `    GCamera:MicroVideoVersion="1"\n` +
-    `    GCamera:MicroVideo="1"\n` +
-    `    GCamera:MicroVideoOffset="${len}"\n` +
-    `    GCamera:MicroVideoPresentationTimestampUs="${tsMicro}"\n` +
     `    GCamera:MotionPhoto="1"\n` +
     `    GCamera:MotionPhotoVersion="1"\n` +
-    `    GCamera:MotionPhotoPresentationTimestampUs="${tsMicro}"\n` +
+    `    GCamera:MotionPhotoPresentationTimestampUs="${ts}"\n` +
     `    OpCamera:MotionPhotoPrimaryPresentationTimestampUs="${ts}"\n` +
     `    OpCamera:MotionPhotoOwner="oplus"\n` +
     `    OpCamera:OLivePhotoVersion="2"\n` +
@@ -282,23 +250,25 @@ export interface MuxOptions {
   presentationTimestampUs?: number;
 }
 
-/** Feature-one entry: video cover + clip → OPPO MotionPhoto (upstream-compatible). */
+/** Feature-one entry: video cover + clip → OPPO MotionPhoto (Young-Spark upstream). */
 export function buildOppoMotionPhoto(
   coverJpeg: Uint8Array,
   videoMp4: Uint8Array,
   options: MuxOptions = {},
 ): Uint8Array {
-  const baseJpeg = ensureOppoUserComment(stripXmpAndMpf(coverJpeg));
+  const cleanJpeg = stripExistingMetadata(coverJpeg);
+  const exif = buildExifApp1();
   const xmp = buildXmpApp1({
     videoLength: videoMp4.length,
     presentationTimestampUs: options.presentationTimestampUs ?? 0,
   });
 
-  const insAfterSoi = findInsertionPoint(baseJpeg);
+  const insAfterSoi = findInsertionPoint(cleanJpeg);
   const withMeta = concat(
-    baseJpeg.subarray(0, insAfterSoi),
+    cleanJpeg.subarray(0, insAfterSoi),
+    exif,
     xmp,
-    baseJpeg.subarray(insAfterSoi),
+    cleanJpeg.subarray(insAfterSoi),
   );
 
   const dummyMpf = buildMpfSegment(0);
@@ -318,35 +288,9 @@ export function buildOppoMotionPhoto(
   return concat(finalJpeg, videoMp4);
 }
 
-/**
- * Re-write MotionPhoto XMP on an existing JPEG (keep EXIF/IPTC).
- * Matches live-photo-conv GExiv2 export: GCamera MicroVideo + Container, no APP2 MPF.
- * Used after copy-img-meta on live.jpg so video size tags match appended MP4 tail.
- */
-export function rebuildMotionPhotoXmpInJpeg(
-  jpeg: Uint8Array,
-  videoLength: number,
-  options: MuxOptions = {},
-): Uint8Array {
-  const baseJpeg = stripXmpAndMpf(jpeg);
-  const xmp = buildXmpApp1({
-    videoLength,
-    presentationTimestampUs: options.presentationTimestampUs ?? 0,
-  });
-
-  const insAfterSoi = findInsertionPoint(baseJpeg);
-  return concat(
-    baseJpeg.subarray(0, insAfterSoi),
-    xmp,
-    baseJpeg.subarray(insAfterSoi),
-  );
-}
-
 export const _internal = {
   findInsertionPoint,
   stripExistingMetadata,
-  stripXmpAndMpf,
-  ensureOppoUserComment,
   buildMpfSegment,
   buildExifApp1,
   buildXmpApp1,

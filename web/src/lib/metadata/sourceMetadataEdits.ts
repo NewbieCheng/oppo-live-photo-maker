@@ -1,3 +1,4 @@
+import type { MetadataWriteBundle } from "@shared/bundleToExiftoolArgs.js";
 import { mergeBundles } from "./fields";
 import { bundleHasEditableFields } from "./parse";
 import type { NativeMetadataBundle } from "./types";
@@ -59,4 +60,33 @@ export function sourceEditsForCopy(
   if (!reference || !hasMetadataEdits(reference, edits)) return undefined;
   const merged = buildEffectiveSourceBundle(reference, edits);
   return bundleHasEditableFields(merged) ? merged : undefined;
+}
+
+/** Only changed fields for in-place metadata write (Feature 3). */
+export function dirtyBundleForWrite(
+  reference: NativeMetadataBundle,
+  edits: NativeMetadataBundle,
+): MetadataWriteBundle {
+  const dirtyKeys = computeDirtyKeys(reference, edits);
+  const exif: Record<string, string> = {};
+  const iptc: Record<string, string> = {};
+
+  for (const key of dirtyKeys) {
+    if (key.startsWith("exif:")) {
+      const field = key.slice(5);
+      const value = edits.exif[field] ?? reference.exif[field];
+      if (value) exif[field] = value;
+    } else if (key.startsWith("iptc:")) {
+      const field = key.slice(5);
+      const value = edits.iptc[field] ?? reference.iptc[field];
+      if (value) iptc[field] = value;
+    }
+  }
+
+  const bundle: MetadataWriteBundle = { exif, iptc };
+  if (dirtyKeys.has("presentationTimestampUs")) {
+    bundle.presentationTimestampUs =
+      edits.presentationTimestampUs ?? reference.presentationTimestampUs;
+  }
+  return bundle;
 }

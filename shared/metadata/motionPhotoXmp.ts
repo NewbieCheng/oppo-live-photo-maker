@@ -1,7 +1,7 @@
 /**
  * MotionPhoto XMP rebuild (GCamera MicroVideo, no APP2 MPF) — shared by backend.
  */
-import { insertAfterAppSegments, scanJpegSegments, stripXmpAndMpf } from "./segments.js";
+import { scanJpegSegments, stripXmpAndMpf } from "./segments.js";
 
 const enc = new TextEncoder();
 

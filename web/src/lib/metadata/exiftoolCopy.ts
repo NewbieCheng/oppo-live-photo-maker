@@ -6,6 +6,7 @@ import { applySourceMetadataEdits } from "./apply";
 import {
   ensureColorOsExifFromSource,
   hasExifApp1Segment,
+  hasMpfApp2Segment,
   needsColorOsExifResync,
   validateColorOsExif,
   type ColorOsExifValidation,
@@ -25,9 +26,10 @@ import {
   warmupExiftoolRuntime,
 } from "./exiftoolWasmRunner";
 import { withExiftoolLock } from "./exiftoolQueue";
-import { detectReferenceFormat } from "./imageFormat";
+import { isJpegFormat, detectReferenceFormat } from "./imageFormat";
 import { bundleHasEditableFields } from "./parse";
 import { copyMetadataViaSegmentTransplant } from "./segmentCopy";
+import { stripMpfApp2 } from "./segments";
 
 type TagMap = Record<string, unknown>;
 
@@ -72,7 +74,7 @@ export async function copyViaExiftool(
     inFlight: wasmInFlightCount(),
     source: sourceFile.name,
     dest: destFile.name,
-    mode: "segment-transplant",
+    mode: "tagsfromfile-or-segment",
   });
 
   return withExiftoolLock(async () => {
@@ -92,28 +94,69 @@ export async function copyViaExiftool(
       const destBytes = new Uint8Array(await destFile.arrayBuffer());
       const sourceBytes = new Uint8Array(await sourceFile.arrayBuffer());
       const sourceFormat = detectReferenceFormat(sourceFile);
+      const destFormat = detectReferenceFormat(destFile);
+      const destIsJpeg = isJpegFormat(destFormat);
 
-      const { jpeg: jpegPart, trailing } = splitJpegAndAppendedTail(destBytes);
-      const motionPhotoDest = trailing.length > 0 && hasLikelyAppendedMp4(trailing);
-      const destJpeg = motionPhotoDest ? jpegPart : destBytes;
+      let destWorking = destBytes;
+      let trailing = new Uint8Array(0);
+      let motionPhotoDest = false;
+      if (destIsJpeg) {
+        const split = splitJpegAndAppendedTail(destBytes);
+        trailing = new Uint8Array(split.trailing);
+        motionPhotoDest = trailing.length > 0 && hasLikelyAppendedMp4(trailing);
+        destWorking = motionPhotoDest ? new Uint8Array(split.jpeg) : destBytes;
+      }
 
       debugLog("G", "exiftoolCopy.ts:copyViaExiftool", "dest-shape", {
         destBytes: destBytes.byteLength,
-        jpegBytes: jpegPart.byteLength,
+        destFormat,
         trailingBytes: trailing.length,
         motionPhotoDest,
         sourceFormat,
       });
 
-      let copiedJpeg = await copyMetadataViaSegmentTransplant(
-        destJpeg,
-        sourceFile,
-        sourceBytes,
-        sourceFormat,
-        options,
-      );
+      const bothJpeg = isJpegFormat(sourceFormat) && destIsJpeg;
+      let copiedJpeg: Uint8Array;
 
-      if (!options.excludeExif && !hasExifApp1Segment(copiedJpeg)) {
+      if (bothJpeg) {
+        const destForCopy = new File([destWorking.slice()], destFile.name, {
+          type: destFile.type || "image/jpeg",
+        });
+        copiedJpeg = await tagsFromFileCopy(
+          destForCopy,
+          sourceFile,
+          buildTagsFromFileArgs(options),
+        );
+        if (destIsJpeg && !options.excludeExif) {
+          copiedJpeg = await syncFullExifFromSource(copiedJpeg, sourceFile);
+        }
+      } else if (isJpegFormat(sourceFormat)) {
+        copiedJpeg = await tagsFromFileCopy(
+          destFile,
+          sourceFile,
+          buildTagsFromFileArgs(options),
+        );
+      } else if (destIsJpeg) {
+        copiedJpeg = await copyMetadataViaSegmentTransplant(
+          destWorking,
+          sourceFile,
+          sourceBytes,
+          sourceFormat,
+          options,
+        );
+      } else {
+        copiedJpeg = await tagsFromFileCopy(
+          destFile,
+          sourceFile,
+          buildTagsFromFileArgs(options),
+        );
+      }
+
+      if (destIsJpeg && !options.excludeExif) {
+        copiedJpeg = stripMpfApp2(copiedJpeg);
+      }
+
+      if (destIsJpeg && !options.excludeExif && !hasExifApp1Segment(copiedJpeg)) {
         debugLog("G", "exiftoolCopy.ts:copyViaExiftool", "segment-fallback", {
           reason: "no EXIF APP1 after transplant",
         });
@@ -131,7 +174,8 @@ export async function copyViaExiftool(
       if (
         options.sourceEdits &&
         bundleHasEditableFields(options.sourceEdits) &&
-        !options.excludeExif
+        !options.excludeExif &&
+        destIsJpeg
       ) {
         copiedJpeg = applySourceMetadataEdits(copiedJpeg, options.sourceEdits);
         debugLog("G", "exiftoolCopy.ts:copyViaExiftool", "source-edits-applied", {
@@ -139,7 +183,7 @@ export async function copyViaExiftool(
         });
       }
 
-      if (motionPhotoDest && trailing.length > 0) {
+      if (motionPhotoDest && trailing.length > 0 && destIsJpeg) {
         copiedJpeg = rebuildMotionPhotoXmpInJpeg(copiedJpeg, trailing.length);
         debugLog("I", "exiftoolCopy.ts:copyViaExiftool", "xmp-sync", {
           videoLength: trailing.length,
@@ -148,7 +192,7 @@ export async function copyViaExiftool(
 
       let colorOsExif: ColorOsExifValidation = { ok: true, issues: [], exifByteOrder: null };
 
-      if (!options.excludeExif) {
+      if (destIsJpeg && !options.excludeExif) {
         let preCheck = await parseMetadataJson<Record<string, unknown>[]>(
           new File([copiedJpeg.slice()], "pre-coloros.jpg", { type: "image/jpeg" }),
           ["-json", "-G1", "-U"],
@@ -157,19 +201,33 @@ export async function copyViaExiftool(
         if (
           needsColorOsExifResync(copiedJpeg, preTags, { requireMakerNotes: true })
         ) {
-          debugLog("G", "exiftoolCopy.ts:copyViaExiftool", "coloros-exif-resync", {
+          debugLog("H1-H4", "exiftoolCopy.ts:copyViaExiftool", "coloros-exif-resync", {
             byteOrder: readExifByteOrder(copiedJpeg),
+            hasMpf: hasMpfApp2Segment(copiedJpeg),
             interop: preTags["EXIF:InteropIndex"],
             ycbcr: preTags["IFD0:YCbCrPositioning"],
+            needsResync: true,
           });
           copiedJpeg = await ensureColorOsExifFromSource(copiedJpeg, sourceFile, preTags, {
             requireMakerNotes: true,
+          });
+          copiedJpeg = stripMpfApp2(copiedJpeg);
+          debugLog("H3", "exiftoolCopy.ts:copyViaExiftool", "coloros-exif-resync-done", {
+            byteOrder: readExifByteOrder(copiedJpeg),
+            hasMpf: hasMpfApp2Segment(copiedJpeg),
           });
           preCheck = await parseMetadataJson<Record<string, unknown>[]>(
             new File([copiedJpeg.slice()], "post-coloros.jpg", { type: "image/jpeg" }),
             ["-json", "-G1", "-U"],
           );
           preTags = preCheck[0] ?? {};
+        } else {
+          debugLog("H1", "exiftoolCopy.ts:copyViaExiftool", "coloros-resync-skipped", {
+            byteOrder: readExifByteOrder(copiedJpeg),
+            hasMpf: hasMpfApp2Segment(copiedJpeg),
+            interop: preTags["EXIF:InteropIndex"],
+            ycbcr: preTags["IFD0:YCbCrPositioning"],
+          });
         }
       }
 
@@ -184,7 +242,7 @@ export async function copyViaExiftool(
         ["-json", "-G1", "-U"],
       );
       const outputTags = outFull[0] ?? {};
-      if (!options.excludeExif) {
+      if (destIsJpeg && !options.excludeExif) {
         colorOsExif = validateColorOsExif(copiedJpeg, outputTags, {
           motionPhoto: motionPhotoDest,
           trailingLength: trailing.length,

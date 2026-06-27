@@ -2,9 +2,10 @@
 import { ref } from "vue";
 import LivePhotoView from "./components/LivePhotoView.vue";
 import MetadataCopyView from "./components/MetadataCopyView.vue";
+import SourceMetadataEditView from "./components/SourceMetadataEditView.vue";
 import { hasWebCodecsApi } from "./lib/webcodecs";
 
-type AppModule = "live" | "meta" | "future";
+type AppModule = "live" | "meta" | "edit";
 
 const activeModule = ref<AppModule>("live");
 const browserHasWebCodecs = hasWebCodecsApi();
@@ -15,7 +16,7 @@ const AUTHOR_URL = "https://github.com/NewbieCheng";
 const MODULES: { id: AppModule; label: string; hint: string; disabled?: boolean }[] = [
   { id: "live", label: "功能一", hint: "视频 → 实况图" },
   { id: "meta", label: "功能二", hint: "元信息复制" },
-  { id: "future", label: "功能三", hint: "即将推出", disabled: true },
+  { id: "edit", label: "功能三", hint: "源信息编辑" },
 ];
 </script>
 
@@ -33,7 +34,8 @@ const MODULES: { id: AppModule; label: string; hint: string; disabled?: boolean 
         <p class="tagline">
           <strong>功能一</strong>：上传视频一键转实况图。
           <strong>功能二</strong>：元信息复制（可选）。
-          <strong>全程本地处理</strong>，视频不会离开本机。
+          <strong>功能三</strong>：编辑原图元数据。
+          <strong>全程本地处理</strong>，文件不会离开本机。
         </p>
       </div>
       <a
@@ -76,10 +78,9 @@ const MODULES: { id: AppModule; label: string; hint: string; disabled?: boolean 
         <MetadataCopyView />
       </div>
 
-      <section v-else class="panel module-placeholder">
-        <p class="panel-title">功能三 · 暂未开放</p>
-        <p class="panel-desc">此模块预留，后续版本再上线。</p>
-      </section>
+      <div v-else-if="activeModule === 'edit'" class="workspace">
+        <SourceMetadataEditView />
+      </div>
     </main>
 
     <footer class="site-footer">

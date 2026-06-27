@@ -103,6 +103,12 @@ describe("needsColorOsExifResync", () => {
     ).toBe(false);
   });
 
+  it("flags MPF APP2 segment", () => {
+    const mpf = seg(0xe2, new TextEncoder().encode("MPF\0\x00\x00"));
+    const jpeg = insertAfterAppSegments(tinyJpeg(), [mpf]);
+    expect(needsColorOsExifResync(jpeg, {})).toBe(true);
+  });
+
   it("requires MakerNotes when option set", () => {
     const ii = insertAfterAppSegments(tinyJpeg(), [exifApp1Ii("OPPO", "Find X8")]);
     expect(

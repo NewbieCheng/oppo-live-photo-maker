@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { _internal as motionPhotoXmpInternal, rebuildMotionPhotoXmpInJpeg } from "@shared/motionPhotoXmp";
 import { insertAfterAppSegments } from "./metadata/segments";
-import { _internal, buildOppoMotionPhoto, rebuildMotionPhotoXmpInJpeg } from "./muxer";
+import { _internal, buildOppoMotionPhoto } from "./muxer";
 
 const { findInsertionPoint, buildMpfSegment, buildXmpPacket, buildExifApp1, buildXmpApp1 } =
   _internal;
@@ -111,9 +112,7 @@ describe("XMP packet", () => {
   it("contains all required OPPO MotionPhoto fields", () => {
     const x = buildXmpPacket({ videoLength: 12345, presentationTimestampUs: 500000 });
     expect(x).toContain('GCamera:MotionPhoto="1"');
-    expect(x).toContain('GCamera:MicroVideo="1"');
-    expect(x).toContain('GCamera:MicroVideoOffset="12345"');
-    expect(x).toContain('GCamera:MicroVideoPresentationTimestampUs="500000"');
+    expect(x).toContain('GCamera:MotionPhotoPresentationTimestampUs="500000"');
     expect(x).toContain('OpCamera:MotionPhotoOwner="oplus"');
     expect(x).toContain('OpCamera:OLivePhotoVersion="2"');
     expect(x).toContain('OpCamera:VideoLength="12345"');
@@ -179,6 +178,8 @@ describe("buildOppoMotionPhoto end-to-end", () => {
 });
 
 describe("rebuildMotionPhotoXmpInJpeg", () => {
+  const { buildXmpApp1: buildRebuildXmpApp1 } = motionPhotoXmpInternal;
+
   function tinyJpeg(): Uint8Array {
     const app0 = seg(0xe0, new TextEncoder().encode("JFIF\0\x01\x01\x00\x00\x01\x00\x01\x00\x00"));
     const dqt = seg(0xdb, new Uint8Array(64).fill(16));
@@ -192,7 +193,7 @@ describe("rebuildMotionPhotoXmpInJpeg", () => {
     mp4[6] = 0x79;
     mp4[7] = 0x70;
     const jpeg = insertAfterAppSegments(tinyJpeg(), [
-      buildXmpApp1({ videoLength: 1, presentationTimestampUs: 0 }),
+      buildRebuildXmpApp1({ videoLength: 1, presentationTimestampUs: 0 }),
       buildMpfSegment(100),
     ]);
     const rebuilt = rebuildMotionPhotoXmpInJpeg(jpeg, mp4.length);

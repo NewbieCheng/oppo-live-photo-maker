@@ -52,9 +52,9 @@ export function debugLog(
   // #region agent log
   fetch("http://127.0.0.1:7797/ingest/5d690944-32ab-4601-abda-19836ca0f9f1", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "3d3364" },
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "206e07" },
     body: JSON.stringify({
-      sessionId: "3d3364",
+      sessionId: "206e07",
       hypothesisId,
       location,
       message,
