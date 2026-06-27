@@ -1,9 +1,7 @@
 import { createRequire } from "node:module";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { Exiv2Module } from "exiv2-wasm";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
 let modulePromise: Promise<Exiv2Module> | null = null;
@@ -12,9 +10,9 @@ let modulePromise: Promise<Exiv2Module> | null = null;
 export async function getExiv2Module(): Promise<Exiv2Module> {
   if (!modulePromise) {
     modulePromise = (async () => {
-      const { createExiv2Module } = await import("exiv2-wasm");
-      const pkgDir = path.dirname(require.resolve("exiv2-wasm/package.json"));
-      const distDir = path.join(pkgDir, "dist");
+      const distDir = path.dirname(require.resolve("exiv2-wasm"));
+      // Use the CJS entry: the ESM build resolves ./dist/exiv2.esm.js from dist/ (wrong path).
+      const createExiv2Module = require("exiv2-wasm") as typeof import("exiv2-wasm").createExiv2Module;
       return createExiv2Module({
         locateFile: (file: string) => path.join(distDir, file),
       });

@@ -29,6 +29,10 @@ export interface CopyMetadataResult {
   colorOsExif?: ColorOsExifValidation;
   /** True when output keeps the destination file extension (ExifTool in-place semantics). */
   destPreservedFormat: boolean;
+  /** Suggested download filename (backend may set via Content-Disposition). */
+  downloadName?: string;
+  /** Backend engine id when copied via local service. */
+  backendUsed?: string;
 }
 
 type TagStats = {

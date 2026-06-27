@@ -119,7 +119,7 @@ try {
     if (-not (Test-TcpPortAvailable -BindHost "127.0.0.1" -Port $FrontendPort)) {
         Write-Host "Frontend port $FrontendPort is in use; Vite will pick the next free port." -ForegroundColor Yellow
     }
-    & npm run dev -- "--port" "$FrontendPort" "--host"
+    & npx vite --port $FrontendPort --host
 } finally {
     Pop-Location
     Stop-DevBackend

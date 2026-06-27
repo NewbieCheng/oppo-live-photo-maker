@@ -113,7 +113,7 @@ export async function copyImageMetadataViaBackend(
   sourceFile: File,
   options: CopyMetadataOptions,
   baseUrl: string,
-): Promise<CopyMetadataResult & { downloadName?: string; backendUsed?: string }> {
+): Promise<CopyMetadataResult> {
   validateCopyOptions(options);
   const root = normalizeBaseUrl(baseUrl);
   const form = new FormData();
