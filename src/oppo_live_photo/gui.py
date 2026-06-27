@@ -779,8 +779,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self, "缺少依赖",
                 "运行需要以下命令行工具，但在 PATH 中未找到：\n\n  - "
                 + "\n  - ".join(missing)
-                + "\n\n请先安装 ffmpeg（https://ffmpeg.org）"
-                  "和 exiftool（https://exiftool.org），然后重启本程序。"
+                + "\n\n请先安装 ffmpeg（https://ffmpeg.org）。"
+                  "exiftool 可运行 scripts/setup-exiftool.ps1 安装到项目 tools/ 目录，"
+                  "或从 https://exiftool.org 安装并加入 PATH，然后重启本程序。"
             )
 
         tabs = QtWidgets.QTabWidget()

@@ -238,4 +238,11 @@ def transcode_clip(
 
 def check_dependencies() -> list[str]:
     """Return a list of missing dependency names."""
-    return [tool for tool in ("ffmpeg", "ffprobe", "exiftool") if not shutil.which(tool)]
+    missing = [tool for tool in ("ffmpeg", "ffprobe") if not shutil.which(tool)]
+    try:
+        from . import muxer
+
+        muxer._find_exiftool()
+    except RuntimeError:
+        missing.append("exiftool")
+    return missing
