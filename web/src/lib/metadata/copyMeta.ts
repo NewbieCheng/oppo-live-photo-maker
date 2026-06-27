@@ -12,7 +12,7 @@ import { detectReferenceFormat } from "./imageFormat";
 import { isSupportedImageFormat } from "./imageToJpeg";
 
 export type { CopyMetadataOptions } from "./copyContract";
-export { OPPO_COPY_PRESET } from "./copyContract";
+export { OPPO_COPY_PRESET, LIVE_PHOTO_TARGET_PRESET, FULL_COPY_PRESET } from "./copyContract";
 
 export interface CopyMetadataResult {
   bytes: Uint8Array;

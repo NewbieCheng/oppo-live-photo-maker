@@ -22,7 +22,7 @@ export {
   type LoadedReferenceImage,
 } from "./referenceLoad";
 export { applyNativeMetadata, buildSyntheticReferenceJpeg, applySourceMetadataEdits, OPPO_USER_COMMENT } from "./apply";
-export { copyImageMetadata, type CopyMetadataOptions, type CopyMetadataResult, OPPO_COPY_PRESET } from "./copyMeta";
+export { copyImageMetadata, type CopyMetadataOptions, type CopyMetadataResult, OPPO_COPY_PRESET, LIVE_PHOTO_TARGET_PRESET, FULL_COPY_PRESET } from "./copyMeta";
 export {
   computeDirtyKeys,
   dirtyBundleForWrite,

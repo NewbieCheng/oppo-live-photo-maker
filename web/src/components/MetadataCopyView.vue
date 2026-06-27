@@ -4,13 +4,18 @@ import SourceMetadataPanel from "./SourceMetadataPanel.vue";
 import {
   copyImageMetadata,
   emptyBundle,
+  FULL_COPY_PRESET,
   loadReferenceImageFile,
-  OPPO_COPY_PRESET,
+  LIVE_PHOTO_TARGET_PRESET,
   sourceEditsForCopy,
   type CopyMetadataOptions,
   type NativeMetadataBundle,
   type ParseSummary,
 } from "../lib/metadata";
+import {
+  isLikelyLivePhotoFilename,
+  isLikelyLivePhotoTarget,
+} from "../lib/metadata/detectLivePhotoTarget";
 import {
   BACKEND_LABELS,
   checkBackendHealth,
@@ -44,7 +49,10 @@ const showSourceMeta = ref(false);
 const excludeExif = ref(false);
 const excludeXmp = ref(true);
 const excludeIptc = ref(false);
-const preset = ref<"default" | "oppo" | "custom">("oppo");
+const preset = ref<"live" | "full" | "custom">("live");
+const destIsLivePhoto = ref(false);
+const destLiveHint = ref("");
+const destLiveWarning = ref("");
 
 const copyEngine = ref<CopyEngine>("browser");
 const backendUrl = ref(loadBackendUrl());
@@ -123,16 +131,58 @@ function reloadSourceMetadataFromFile() {
   if (sourceFile.value) void parseSourceMetadata(sourceFile.value);
 }
 
-function applyPreset(mode: "default" | "oppo" | "custom") {
+function applyPreset(mode: "full" | "live" | "custom") {
   preset.value = mode;
-  if (mode === "default") {
-    excludeExif.value = false;
-    excludeXmp.value = false;
-    excludeIptc.value = false;
-  } else if (mode === "oppo") {
-    excludeExif.value = OPPO_COPY_PRESET.excludeExif ?? false;
-    excludeXmp.value = OPPO_COPY_PRESET.excludeXmp ?? true;
-    excludeIptc.value = OPPO_COPY_PRESET.excludeIptc ?? false;
+  if (mode === "full") {
+    excludeExif.value = FULL_COPY_PRESET.excludeExif ?? false;
+    excludeXmp.value = FULL_COPY_PRESET.excludeXmp ?? false;
+    excludeIptc.value = FULL_COPY_PRESET.excludeIptc ?? false;
+  } else if (mode === "live") {
+    excludeExif.value = LIVE_PHOTO_TARGET_PRESET.excludeExif ?? false;
+    excludeXmp.value = LIVE_PHOTO_TARGET_PRESET.excludeXmp ?? true;
+    excludeIptc.value = LIVE_PHOTO_TARGET_PRESET.excludeIptc ?? false;
+  }
+  updateDestLiveHints();
+}
+
+function updateDestLiveHints() {
+  if (!destIsLivePhoto.value) {
+    destLiveHint.value = "";
+    destLiveWarning.value = "";
+    return;
+  }
+  if (preset.value === "live") {
+    destLiveHint.value =
+      "已识别为实况图目标：Live 目标预设不会复制源图 XMP，copy 后会同步 MotionPhoto 标签。";
+    destLiveWarning.value = "";
+  } else if (preset.value === "full") {
+    destLiveHint.value = "";
+    destLiveWarning.value =
+      "目标为实况图且使用全量预设：可能短暂覆盖 MotionPhoto XMP；复制后会自动重建，仍建议改用 Live 目标。";
+  } else {
+    destLiveHint.value = "已识别为实况图目标。";
+    destLiveWarning.value =
+      excludeXmp.value
+        ? ""
+        : "自定义选项未排除 XMP：向 live.jpg 复制可能覆盖 MotionPhoto 标签。";
+  }
+}
+
+async function inspectDestLivePhoto(f: File) {
+  destIsLivePhoto.value = false;
+  destLiveHint.value = "";
+  destLiveWarning.value = "";
+  try {
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    destIsLivePhoto.value = isLikelyLivePhotoTarget(f, bytes);
+    if (destIsLivePhoto.value && preset.value !== "custom") {
+      applyPreset("live");
+    } else {
+      updateDestLiveHints();
+    }
+  } catch {
+    destIsLivePhoto.value = isLikelyLivePhotoFilename(f.name);
+    updateDestLiveHints();
   }
 }
 
@@ -215,7 +265,7 @@ async function loadSource(f: File) {
 async function loadDest(f: File) {
   clearResult();
   destFile.value = f;
-  await setPreview(f, "dest");
+  await Promise.all([setPreview(f, "dest"), inspectDestLivePhoto(f)]);
 }
 
 function clearSource() {
@@ -230,6 +280,9 @@ function clearDest() {
   if (destPreviewUrl.value) URL.revokeObjectURL(destPreviewUrl.value);
   destPreviewUrl.value = "";
   destFile.value = null;
+  destIsLivePhoto.value = false;
+  destLiveHint.value = "";
+  destLiveWarning.value = "";
   clearResult();
 }
 
@@ -475,27 +528,32 @@ onBeforeUnmount(() => {
     </div>
 
     <p class="workflow-hint">
-      推荐流程：目标图使用普通封面 JPG（勿直接选 live.jpg），复制元数据后再用功能一合成 MotionPhoto。
-      若目标已是 live.jpg，请使用 OPPO 预设（排除 XMP）。
+      <strong>网页（仅视频）</strong>：功能一生成 live.jpg → 本页复制 OPPO 原片 EXIF（Live 目标预设）。
+      <strong>桌面 / CLI 更稳</strong>：先复制到普通封面 JPG，再用
+      <code>oppo-live</code> 或 live-photo-conv 合成（见 README）。
+      普通 JPG 作目标时更接近 live-photo-conv FAQ 推荐流程。
     </p>
+
+    <p v-if="destLiveHint" class="dest-live-hint">{{ destLiveHint }}</p>
+    <p v-if="destLiveWarning" class="dest-live-warn" role="alert">{{ destLiveWarning }}</p>
 
     <div class="copy-actions">
       <div class="preset-compact" role="group" aria-label="复制预设">
         <button
           type="button"
           class="preset-chip"
-          :class="{ active: preset === 'oppo' }"
-          @click="applyPreset('oppo')"
+          :class="{ active: preset === 'live' }"
+          @click="applyPreset('live')"
         >
-          OPPO
+          Live 目标
         </button>
         <button
           type="button"
           class="preset-chip"
-          :class="{ active: preset === 'default' }"
-          @click="applyPreset('default')"
+          :class="{ active: preset === 'full' }"
+          @click="applyPreset('full')"
         >
-          全量
+          全量（含 XMP）
         </button>
       </div>
 
@@ -620,6 +678,28 @@ onBeforeUnmount(() => {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
+.workflow-hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-soft);
+  line-height: 1.65;
+}
+.workflow-hint code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.dest-live-hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--live);
+  line-height: 1.55;
+}
+.dest-live-warn {
+  margin: 0;
+  font-size: 13px;
+  color: var(--warm, #e6a23c);
+  line-height: 1.55;
+}
 .copy-actions {
   display: flex;
   flex-direction: column;
@@ -706,12 +786,6 @@ onBeforeUnmount(() => {
   line-height: 1.45;
   color: var(--warn-fg, #8a5a00);
   background: var(--warn-bg, rgba(255, 180, 0, 0.12));
-}
-.workflow-hint {
-  margin: 0 0 12px;
-  font-size: 0.8125rem;
-  line-height: 1.45;
-  color: var(--muted, #666);
 }
 .download {
   text-decoration: none;

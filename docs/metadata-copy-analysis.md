@@ -21,11 +21,21 @@
 
 | 用途 | 依赖字段 | 由谁写入 |
 |------|----------|----------|
-| **动态照片识别 / 长按播放** | OpCamera XMP、GCamera MotionPhoto、MPF、`UserComment` | 功能一 **mux** |
+| **动态照片识别 / 长按播放** | OpCamera XMP、GCamera MotionPhoto、MPF、`UserComment` | 功能一 **mux**；向 live.jpg copy 后 **rebuild MotionPhoto XMP** |
 | **水印曝光行** | `FNumber`、`ExposureTime`、`ISO`、`FocalLength` 等 ExifIFD | 功能二 **copy** |
 | **水印机型名** | IFD0 `Make`/`Model` + 可能的 MakerNotes；需 **II 字节序** 与完整 Interop | 功能二 **copy**（GExiv2/ExifTool） |
 
-`copy-img-meta` / 功能二 **不负责** MotionPhoto 识别所需的 OpCamera XMP（OPPO 预设会 **排除 XMP**）。
+**重要**：OPPO 实况图**最终必须有** MotionPhoto XMP（`VideoLength`、`OpCamera` 等）。功能二 `--exclude-xmp` / **Live 目标**预设的含义是：**不复制源图 XMP**，以免覆盖目标上已有的 MotionPhoto 标签——不是「OPPO 不需要 XMP」。
+
+### 2.1 资料来源说明
+
+以下结论来自社区逆向与工具链实践，**非 OPPO 官方文档**：
+
+- [live-photo-conv FAQ — Android 厂商分裂](https://github.com/wszqkzqk/live-photo-conv/blob/main/README-zh.md)：向已生成的 live 图复制厂商 EXIF 时建议 `--exclude-xmp`
+- [Young-Spark/oppo-live-photo-maker](https://github.com/Young-Spark/oppo-live-photo-maker)：MotionPhoto XMP + MP4 尾部结构
+- OPPO O Live Photo 逆向（Find X7/X8 等样本）：`GCamera:MotionPhoto`、`OpCamera:VideoLength`、`Container:Directory` 等
+
+`copy-img-meta` **默认**复制 XMP（`--with-xmp`）；排除 XMP 是可选 workaround，不是 universal 规则。
 
 ---
 
@@ -53,8 +63,9 @@
 ② 功能二：
    源图 = A（OPPO 原片）
    目标图 = ① 刚下的 video.live.jpg
-   预设 = OPPO 推荐（排除 XMP）
+   预设 = Live 目标（排除源 XMP，保护 MotionPhoto）
    → 下载  video.live-meta.jpg
+   （copy 后会按 MP4 尾部 rebuild MotionPhoto XMP）
 
 ③ 手机：只拷 video.live-meta.jpg，在相册里测播放 + 水印机型
 ```
@@ -113,25 +124,27 @@ oppo-live VIDEO.mp4 --reference-image oppo_source.heic --cover-mode reference
 功能一 → live.jpg → 功能二（源 HEIC + 目标 live.jpg）→ *-meta.jpg
 ```
 
-风险：
+注意：
 
 - 需切分 JPEG / MP4 尾部再拼回  
-- **排除 XMP** 时旧 `VideoLength` 可能与真实 MP4 尾部不一致  
-- ExifTool WASM 可能写出 **MM 大端** EXIF，与 OPPO 原片 **II 小端** 不一致  
+- copy 完成后会 **rebuild MotionPhoto XMP**（按实际 MP4 尾部同步 `VideoLength`）  
+- ExifTool WASM 可能写出 **MM 大端** EXIF，与 OPPO 原片 **II 小端** 不一致（ColorOS 水印敏感）
 
-仅在无法先 copy 到封面时使用；优先 3.1。
+桌面 / CLI「先 copy 到普通封面再 mux」仍更稳；网页仅视频时用本路径。
 
 ---
 
 ### 3.4 功能二 UI 选项说明
 
-| 选项 | 对应 CLI | OPPO 预设 | 说明 |
-|------|----------|-----------|------|
-| 排除 EXIF | `--exclude-exif` | 关 | 关 = 复制 Make/Model/ISO 等 |
-| 排除 XMP | `--exclude-xmp` | **开** | 保留目标 MotionPhoto XMP，不覆盖 |
-| 排除 IPTC | `--exclude-iptc` | 关 | 一般保留 |
+| 选项 | 对应 CLI | Live 目标预设 | 全量（含 XMP）预设 |
+|------|----------|---------------|-------------------|
+| 排除 EXIF | `--exclude-exif` | 关 | 关 |
+| 排除 XMP | `--exclude-xmp` | **开** | 关（对齐 live-photo-conv 默认 `--with-xmp`） |
+| 排除 IPTC | `--exclude-iptc` | 关 | 关 |
 
-**机型在 EXIF，不在 XMP**；排除 XMP 不会直接删掉 Make/Model，但会保留 mux 写入的（可能过时的）`VideoLength`。
+- **Live 目标**：向 `*.live.jpg` 复制时**不复制源图 XMP**，避免覆盖 MotionPhoto 字段；copy 后 rebuild 同步 `VideoLength`。
+- **全量（含 XMP）**：对齐 `copy-img-meta` 默认；目标为 live.jpg 时可能短暂覆盖 MotionPhoto XMP，copy 后仍会 rebuild，但建议用 Live 目标。
+- **机型水印依赖 EXIF**（Make/Model、MakerNotes、II 字节序），与是否复制源 XMP 无直接冲突。
 
 ---
 
@@ -262,7 +275,7 @@ TagsFromFile 源 -All:all [--XMP:all] -o 输出 目标
 | 优先级 | 项 | 说明 |
 |--------|-----|------|
 | P0 | ExifTool 输出 **II 小端** | `-api ByteOrder=II` 或复制后转换 |
-| P0 | copy 后 **同步 VideoLength** | 按实际 MP4 尾部更新 OpCamera/Container |
+| P0 | copy 后 **同步 VideoLength** | 向 live.jpg copy 后 rebuild MotionPhoto XMP（web / Python / backend 已统一） |
 | P1 | 补全 Interop / OffsetTime | 从源图复制或写入默认值 |
 | P2 | UI 引导「先 copy 封面再 mux」 | 减少 live.jpg 作目标 |
 | P2 | 一键流水线 | 功能二结果直接进功能一 |
@@ -324,3 +337,4 @@ def scan_jpeg(path: str) -> None:
 |------|------|
 | 2026-06-27 | 初版：output2 vs live-meta CLI 对比、推荐步骤、排查清单 |
 | 2026-06-27 | 修正：区分网页功能一（仅视频）与桌面「封面+视频」流程 |
+| 2026-06-27 | 语义纠正：排除 XMP ≠ OPPO 不要 XMP；明确 MotionPhoto XMP 由 mux/rebuild 保证；修正 README 流程顺序 |

@@ -33,7 +33,7 @@ const MODULES: { id: AppModule; label: string; hint: string; disabled?: boolean 
         </div>
         <p class="tagline">
           <strong>功能一</strong>：上传视频一键转实况图。
-          <strong>功能二</strong>：元信息复制（可选）。
+          <strong>功能二</strong>：元信息复制（向 live.jpg 时保护 MotionPhoto XMP）。
           <strong>功能三</strong>：编辑原图元数据。
           <strong>全程本地处理</strong>，文件不会离开本机。
         </p>

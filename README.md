@@ -95,15 +95,15 @@ python main.py
 
 ### 原生元数据（参考图）
 
-对齐 [live-photo-conv](https://github.com/wszqkzqk/live-photo-conv) 的 `copy-img-meta --exclude-xmp` 逻辑：
+对齐 [live-photo-conv](https://github.com/wszqkzqk/live-photo-conv) 的 `copy-img-meta` 逻辑（参考图路径使用 `--exclude-xmp`，不复制源图 XMP；mux 会写入 MotionPhoto XMP）：
 
 | 模式 | 说明 |
 |------|------|
-| **仅移植元数据** | 封面仍从视频帧抽取；参考图的 EXIF/IPTC 写入输出（不含实况 XMP） |
+| **仅移植元数据** | 封面仍从视频帧抽取；参考图的 EXIF/IPTC 写入输出（不复制源图 XMP；mux 注入 MotionPhoto XMP） |
 | **参考图作封面** | 参考图 JPEG 作为静态封面像素 + 元数据来源 |
 
 - EXIF `UserComment` 始终强制为 `Oplus_8388608`（OPPO 识别必需）
-- 同时写入 Google MotionPhoto 与 MicroVideo（旧标准）XMP 标签
+- mux 写入 Google MotionPhoto + OpCamera + Container XMP（实况识别必需）
 
 **网页版 HEIC 说明**：功能二提供两种复制引擎：
 
@@ -116,14 +116,18 @@ python main.py
 
 | live-photo-conv | 网页功能二 |
 |-----------------|------------|
+| 默认 `--with-xmp` | **全量（含 XMP）** 预设 |
 | `--exclude-exif` | 排除 EXIF |
-| `--exclude-xmp` | 排除 XMP（**OPPO 推荐**预设） |
+| `--exclude-xmp` | 排除 XMP（**Live 目标**预设：保护目标 MotionPhoto XMP） |
 | `--exclude-iptc` | 排除 IPTC |
 | 保留目标图像素与格式 | 保留目标图像素与格式 |
 
 元信息复制步骤、CLI 对比与机型水印排查见 **[docs/metadata-copy-analysis.md](docs/metadata-copy-analysis.md)**。
 
-**推荐 OPPO 流程**：功能二「OPPO 推荐（排除 XMP）」→ 功能一视频转实况。
+**推荐 OPPO 流程**：
+
+- **网页版（仅视频）**：功能一 → 功能二（**Live 目标**预设，向 `*.live.jpg` 复制 EXIF）
+- **桌面 / CLI（最稳，对齐 [live-photo-conv FAQ](https://github.com/wszqkzqk/live-photo-conv/blob/main/README-zh.md)）**：功能二 copy 到普通封面 JPG → `oppo-live` / `live-photo-conv --make` 合成
 
 ### 命令行
 

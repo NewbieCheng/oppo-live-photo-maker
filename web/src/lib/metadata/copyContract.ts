@@ -12,6 +12,8 @@ export interface CopyMetadataOptions extends BaseCopyMetadataOptions {
 
 export {
   OPPO_COPY_PRESET,
+  LIVE_PHOTO_TARGET_PRESET,
+  FULL_COPY_PRESET,
   validateCopyOptions,
   buildTagsFromFileArgs,
   vfsBasename,

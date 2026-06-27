@@ -13,7 +13,12 @@ import {
   splitJpegAndAppendedTail,
 } from "@shared/jpegTail.js";
 import { rebuildMotionPhotoXmpInJpeg } from "@shared/motionPhotoXmp.js";
-import { extractMetadataSegments, insertAfterAppSegments, stripMetadataForCopy } from "@shared/segments.js";
+import {
+  extractMetadataSegments,
+  insertAfterAppSegments,
+  stripMetadataForCopy,
+  stripMpfApp2,
+} from "@shared/segments.js";
 import { findExiftool, readTagsJson, syncFullExifFromSource, tagsFromFileCopyDest } from "./exiftoolCli.js";
 
 export interface PostCopyResult {
@@ -27,7 +32,7 @@ export function postCopyPipeline(
   sourcePath: string,
   trailing: Uint8Array,
   options: CopyMetadataOptions,
-  backendUsed: string,
+  _backendUsed: string,
 ): PostCopyResult {
   let working = jpeg;
   const motionPhoto = trailing.length > 0 && hasLikelyAppendedMp4(trailing);
@@ -36,17 +41,23 @@ export function postCopyPipeline(
     working = tagsFromFileCopyDest(working, sourcePath, options);
   }
 
+  if (!options.excludeExif) {
+    working = stripMpfApp2(working);
+  }
+
   let tags = readTagsJson(working);
-  if (
+  const exiftoolOk = !!findExiftool();
+  const needsResync =
     !options.excludeExif &&
-    findExiftool() &&
-    needsColorOsExifResync(working, tags, { requireMakerNotes: backendUsed !== "jpeg-segment-transplant" })
-  ) {
+    exiftoolOk &&
+    needsColorOsExifResync(working, tags, { requireMakerNotes: true });
+  if (needsResync) {
     working = syncFullExifFromSource(working, sourcePath);
+    working = stripMpfApp2(working);
     tags = readTagsJson(working);
   }
 
-  if (motionPhoto && !options.excludeXmp) {
+  if (motionPhoto) {
     working = rebuildMotionPhotoXmpInJpeg(working, trailing.length);
     tags = readTagsJson(working);
   }

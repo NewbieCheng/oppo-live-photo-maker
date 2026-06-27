@@ -7,9 +7,20 @@ export interface CopyMetadataOptions {
   excludeIptc?: boolean;
 }
 
-export const OPPO_COPY_PRESET: CopyMetadataOptions = {
+/** Aligns with live-photo-conv default: copy EXIF + XMP + IPTC. */
+export const FULL_COPY_PRESET: CopyMetadataOptions = {};
+
+/**
+ * When the destination is (or will become) a MotionPhoto / live.jpg:
+ * do not copy source XMP so mux-written MotionPhoto tags are not overwritten.
+ * Matches live-photo-conv `--exclude-xmp` in its Android vendor FAQ workaround.
+ */
+export const LIVE_PHOTO_TARGET_PRESET: CopyMetadataOptions = {
   excludeXmp: true,
 };
+
+/** @deprecated Use LIVE_PHOTO_TARGET_PRESET */
+export const OPPO_COPY_PRESET: CopyMetadataOptions = LIVE_PHOTO_TARGET_PRESET;
 
 export function validateCopyOptions(options: CopyMetadataOptions): void {
   if (options.excludeExif && options.excludeXmp && options.excludeIptc) {
