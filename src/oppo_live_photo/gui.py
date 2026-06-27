@@ -15,6 +15,47 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 
 from . import ffmpeg_utils, gui_styles, metadata, muxer
 
+STEP_LABELS = ["原生图", "视频", "元数据", "导出"]
+
+# Metadata field groups mirroring web/src/lib/metadata/fields.ts
+METADATA_GROUPS: list[tuple[str, str, list[tuple[str, str]], bool]] = [
+    ("camera", "相机", [
+        ("EXIF:Make", "品牌 (Make)"),
+        ("EXIF:Model", "型号 (Model)"),
+        ("EXIF:Software", "软件 (Software)"),
+        ("EXIF:LensModel", "镜头 (LensModel)"),
+        ("EXIF:Orientation", "方向 (Orientation)"),
+    ], False),
+    ("exposure", "曝光", [
+        ("EXIF:FNumber", "光圈 (FNumber)"),
+        ("EXIF:ExposureTime", "快门 (ExposureTime)"),
+        ("EXIF:ISO", "ISO"),
+        ("EXIF:FocalLength", "焦距 (FocalLength)"),
+        ("EXIF:Flash", "闪光灯 (Flash)"),
+        ("EXIF:WhiteBalance", "白平衡 (WhiteBalance)"),
+    ], False),
+    ("datetime", "时间", [
+        ("EXIF:DateTimeOriginal", "拍摄时间"),
+        ("EXIF:CreateDate", "创建时间"),
+        ("EXIF:ModifyDate", "修改时间"),
+        ("EXIF:OffsetTimeOriginal", "时区偏移"),
+    ], False),
+    ("location", "位置", [
+        ("Composite:GPSLatitude", "纬度 (GPSLatitude)"),
+        ("Composite:GPSLongitude", "经度 (GPSLongitude)"),
+        ("Composite:GPSAltitude", "海拔 (GPSAltitude)"),
+        ("EXIF:GPSDateStamp", "GPS 日期"),
+    ], False),
+    ("iptc", "IPTC", [
+        ("IPTC:Keywords", "关键词"),
+        ("IPTC:Caption-Abstract", "说明"),
+        ("IPTC:CopyrightNotice", "版权"),
+    ], True),
+]
+
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".heic", ".heif", ".png", ".webp"}
+VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
+
 
 class ConvertParams(TypedDict, total=False):
     start: float
@@ -113,10 +154,10 @@ class ConvertWorker(QtCore.QObject):
             self.failed.emit(f"{e}\n\n{tb}")
 
 
-# ---------- Drag-and-drop video list ---------------------------------------
+# ---------- Shared widgets ---------------------------------------------------
 
 class VideoListWidget(QtWidgets.QListWidget):
-    """QListWidget that accepts video file drops via the standard event API."""
+    """QListWidget that accepts video file drops."""
 
     files_dropped = Signal(list)
 
@@ -152,7 +193,148 @@ class VideoListWidget(QtWidgets.QListWidget):
             e.acceptProposedAction()
 
 
-# ---------- Shared UI helpers ------------------------------------------------
+class FileDropFrame(QtWidgets.QFrame):
+    """Clickable / droppable target matching web drop-target."""
+
+    activated = Signal()
+    file_dropped = Signal(Path)
+
+    def __init__(
+        self,
+        icon: str,
+        title: str,
+        hint: str,
+        suffixes: set[str],
+        parent: QtWidgets.QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self._suffixes = suffixes
+        self.setObjectName("dropTarget")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding,
+        )
+        self.setMinimumHeight(160)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(24, 40, 24, 40)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignCenter)
+
+        icon_lbl = QtWidgets.QLabel(icon)
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        icon_lbl.setStyleSheet(
+            f"font-size: 28px; color: {gui_styles.TEXT_SOFT};"
+        )
+        title_lbl = QtWidgets.QLabel(title)
+        title_lbl.setObjectName("panelTitle")
+        title_lbl.setAlignment(Qt.AlignCenter)
+        hint_lbl = QtWidgets.QLabel(hint)
+        hint_lbl.setObjectName("emptyHint")
+        hint_lbl.setAlignment(Qt.AlignCenter)
+        hint_lbl.setWordWrap(True)
+        layout.addWidget(icon_lbl)
+        layout.addWidget(title_lbl)
+        layout.addWidget(hint_lbl)
+
+        self.setAcceptDrops(True)
+
+    def mousePressEvent(self, e: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if e.button() == Qt.LeftButton:
+            self.activated.emit()
+        super().mousePressEvent(e)
+
+    def dragEnterEvent(self, e: QtGui.QDragEnterEvent) -> None:  # noqa: N802
+        if self._first_matching(e.mimeData()):
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dragMoveEvent(self, e: QtGui.QDragMoveEvent) -> None:  # noqa: N802
+        if self._first_matching(e.mimeData()):
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dropEvent(self, e: QtGui.QDropEvent) -> None:  # noqa: N802
+        path = self._first_matching(e.mimeData())
+        if path:
+            self.file_dropped.emit(path)
+            e.acceptProposedAction()
+
+    def _first_matching(self, mime: QtCore.QMimeData) -> Path | None:
+        if not mime.hasUrls():
+            return None
+        for url in mime.urls():
+            p = Path(url.toLocalFile())
+            if p.is_file() and p.suffix.lower() in self._suffixes:
+                return p
+        return None
+
+
+class StepIndicator(QtWidgets.QWidget):
+    """Four-step track mirroring web StepIndicator.vue."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None):
+        super().__init__(parent)
+        self._current = 1
+        self._dots: list[QtWidgets.QLabel] = []
+        self._names: list[QtWidgets.QLabel] = []
+        self._build()
+
+    def _build(self) -> None:
+        row = QtWidgets.QHBoxLayout(self)
+        row.setContentsMargins(0, 4, 0, 4)
+        row.setSpacing(0)
+
+        for i, label in enumerate(STEP_LABELS):
+            if i > 0:
+                conn = QtWidgets.QFrame()
+                conn.setObjectName("stepConnector")
+                conn.setSizePolicy(
+                    QtWidgets.QSizePolicy.Expanding,
+                    QtWidgets.QSizePolicy.Fixed,
+                )
+                row.addWidget(conn, 1)
+
+            node = QtWidgets.QVBoxLayout()
+            node.setSpacing(8)
+            node.setAlignment(Qt.AlignCenter)
+            dot = QtWidgets.QLabel()
+            dot.setObjectName("stepDot")
+            dot.setAlignment(Qt.AlignCenter)
+            name = QtWidgets.QLabel(label)
+            name.setObjectName("stepName")
+            name.setAlignment(Qt.AlignCenter)
+            self._dots.append(dot)
+            self._names.append(name)
+            node_wrap = QtWidgets.QWidget()
+            node_wrap.setLayout(node)
+            node.addWidget(dot, 0, Qt.AlignHCenter)
+            node.addWidget(name, 0, Qt.AlignHCenter)
+            row.addWidget(node_wrap)
+
+        self.set_current(1)
+
+    def set_current(self, step: int) -> None:
+        self._current = max(1, min(4, step))
+        for i in range(4):
+            idx = i + 1
+            if idx == self._current:
+                self._dots[i].setObjectName("stepDotActive")
+                self._names[i].setObjectName("stepNameActive")
+            elif idx < self._current:
+                self._dots[i].setObjectName("stepDotDone")
+                self._names[i].setObjectName("stepNameDone")
+            else:
+                self._dots[i].setObjectName("stepDot")
+                self._names[i].setObjectName("stepName")
+            self._dots[i].style().unpolish(self._dots[i])
+            self._dots[i].style().polish(self._dots[i])
+            self._names[i].style().unpolish(self._names[i])
+            self._names[i].style().polish(self._names[i])
+
 
 def _make_chip(text: str, *, accent: bool = False) -> QtWidgets.QLabel:
     chip = QtWidgets.QLabel(text)
@@ -160,26 +342,22 @@ def _make_chip(text: str, *, accent: bool = False) -> QtWidgets.QLabel:
     return chip
 
 
-def _build_step_hint() -> QtWidgets.QWidget:
-    """Decorative step labels matching web StepIndicator."""
-    row = QtWidgets.QHBoxLayout()
-    row.setContentsMargins(0, 0, 0, 0)
-    row.setSpacing(0)
-    labels = ["原生图", "视频", "元数据", "导出"]
-    for i, name in enumerate(labels):
-        if i > 0:
-            sep = QtWidgets.QLabel("—")
-            sep.setObjectName("stepHint")
-            sep.setAlignment(Qt.AlignCenter)
-            row.addWidget(sep)
-        lbl = QtWidgets.QLabel(name)
-        lbl.setObjectName("stepHintActive" if i == 0 else "stepHint")
-        lbl.setAlignment(Qt.AlignCenter)
-        row.addWidget(lbl)
-    row.addStretch(1)
-    wrap = QtWidgets.QWidget()
-    wrap.setLayout(row)
-    return wrap
+def _wrap_scroll(content: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
+    scroll = QtWidgets.QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    scroll.setWidget(content)
+    return scroll
+
+
+def _panel_frame() -> tuple[QtWidgets.QFrame, QtWidgets.QVBoxLayout]:
+    frame = QtWidgets.QFrame()
+    frame.setObjectName("stepPanel")
+    layout = QtWidgets.QVBoxLayout(frame)
+    layout.setContentsMargins(24, 24, 24, 24)
+    layout.setSpacing(18)
+    return frame, layout
 
 
 def _build_brand_header() -> QtWidgets.QWidget:
@@ -215,7 +393,7 @@ def _build_brand_header() -> QtWidgets.QWidget:
     return header
 
 
-# ---------- Single convert tab ---------------------------------------------
+# ---------- Single convert tab (4-step wizard) --------------------------------
 
 class SingleTab(QtWidgets.QWidget):
     def __init__(self):
@@ -228,31 +406,233 @@ class SingleTab(QtWidgets.QWidget):
         self.reference_path: Path | None = None
         self.reference_bundle: metadata.NativeMetadataBundle | None = None
         self.metadata_edits = metadata.NativeMetadataBundle()
+        self._step = 1
+        self._meta_group_id = "camera"
+        self._convert_running = False
 
         self._build_ui()
+        self._update_nav()
+        self._update_export_state()
 
-    def _build_ui(self):
-        v = QtWidgets.QVBoxLayout(self)
-        v.setContentsMargins(12, 8, 12, 8)
-        v.setSpacing(12)
+    def _build_ui(self) -> None:
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(12)
 
-        v.addWidget(_build_step_hint())
+        self.step_indicator = StepIndicator()
+        root.addWidget(self.step_indicator)
 
-        # Top bar
-        top = QtWidgets.QHBoxLayout()
-        self.path_edit = QtWidgets.QLineEdit()
-        self.path_edit.setPlaceholderText("请选择一个视频文件...")
-        self.path_edit.setReadOnly(True)
-        btn_open = QtWidgets.QPushButton("打开视频…")
-        btn_open.clicked.connect(self._pick_video)
-        top.addWidget(self.path_edit, 1)
-        top.addWidget(btn_open)
-        v.addLayout(top)
+        nav = QtWidgets.QHBoxLayout()
+        self.btn_prev = QtWidgets.QPushButton("← 上一步")
+        self.btn_prev.clicked.connect(self._prev_step)
+        self.lbl_step_nav = QtWidgets.QLabel(STEP_LABELS[0])
+        self.lbl_step_nav.setObjectName("stepNavLabel")
+        self.lbl_step_nav.setAlignment(Qt.AlignCenter)
+        self.btn_next = QtWidgets.QPushButton("下一步 →")
+        self.btn_next.clicked.connect(self._next_step)
+        nav.addWidget(self.btn_prev)
+        nav.addWidget(self.lbl_step_nav, 1)
+        nav.addWidget(self.btn_next)
+        root.addLayout(nav)
 
-        # Video preview
+        self.stack = QtWidgets.QStackedWidget()
+        self.stack.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding,
+        )
+        root.addWidget(self.stack, 1)
+
+        self._build_step_reference()
+        self._build_step_video()
+        self._build_step_metadata()
+        self._build_step_export()
+
+        self.stack.setCurrentIndex(0)
+
+    # --- Step 1: 原生图 ---
+    def _build_step_reference(self) -> None:
+        page = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        frame, layout = _panel_frame()
+        title = QtWidgets.QLabel("上传机内原图")
+        title.setObjectName("panelTitle")
+        desc = QtWidgets.QLabel(
+            "第一步：上传手机相册里的普通照片（机内直出的 JPG / HEIC 等）。"
+            "工具会实时读取 Make、Model、拍摄时间、GPS 等 EXIF，并在导出时移植到实况图。"
+        )
+        desc.setObjectName("panelDesc")
+        desc.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        self.ref_drop = FileDropFrame(
+            "◫",
+            "拖入或选择机内原图",
+            "JPG · HEIC · HEIF · PNG · WebP · 不上传服务器",
+            IMAGE_SUFFIXES,
+        )
+        self.ref_drop.activated.connect(self._pick_reference)
+        self.ref_drop.file_dropped.connect(self.load_reference)
+        layout.addWidget(self.ref_drop)
+
+        self.ref_parsing = QtWidgets.QLabel("正在解析…")
+        self.ref_parsing.setObjectName("sectionDesc")
+        self.ref_parsing.setVisible(False)
+        layout.addWidget(self.ref_parsing)
+
+        self.ref_preview = QtWidgets.QWidget()
+        ref_prev_layout = QtWidgets.QHBoxLayout(self.ref_preview)
+        ref_prev_layout.setContentsMargins(0, 0, 0, 0)
+        ref_prev_layout.setSpacing(20)
+        self.ref_thumb = QtWidgets.QLabel()
+        self.ref_thumb.setFixedSize(140, 140)
+        self.ref_thumb.setAlignment(Qt.AlignCenter)
+        self.ref_thumb.setStyleSheet(
+            f"background: #000; border: 1px solid {gui_styles.BORDER}; "
+            "border-radius: 10px;"
+        )
+        self.ref_thumb.setScaledContents(True)
+        ref_meta = QtWidgets.QVBoxLayout()
+        self.ref_name = QtWidgets.QLabel()
+        self.ref_name.setObjectName("filename")
+        self.ref_name.setWordWrap(True)
+        self.ref_chips_row = QtWidgets.QHBoxLayout()
+        self.ref_chips_row.setSpacing(6)
+        self.ref_chips_widget = QtWidgets.QWidget()
+        self.ref_chips_widget.setLayout(self.ref_chips_row)
+        ref_actions = QtWidgets.QHBoxLayout()
+        btn_change = QtWidgets.QPushButton("更换")
+        btn_change.setObjectName("ghostButton")
+        btn_change.clicked.connect(self._pick_reference)
+        btn_remove = QtWidgets.QPushButton("移除")
+        btn_remove.setObjectName("ghostButton")
+        btn_remove.clicked.connect(self._clear_reference)
+        ref_actions.addWidget(btn_change)
+        ref_actions.addWidget(btn_remove)
+        ref_actions.addStretch(1)
+        ref_meta.addWidget(self.ref_name)
+        ref_meta.addWidget(self.ref_chips_widget)
+        ref_meta.addLayout(ref_actions)
+        ref_meta.addStretch(1)
+        ref_prev_layout.addWidget(self.ref_thumb)
+        ref_prev_layout.addLayout(ref_meta, 1)
+        self.ref_preview.setVisible(False)
+        layout.addWidget(self.ref_preview)
+
+        cover_legend = QtWidgets.QLabel("封面来源")
+        cover_legend.setObjectName("fieldLabel")
+        layout.addWidget(cover_legend)
+
+        self.cover_mode_group = QtWidgets.QButtonGroup(self)
+        self.mode_video_frame = self._make_mode_option(
+            "视频帧", "从预览中截取静态封面", "video"
+        )
+        self.mode_ref_image = self._make_mode_option(
+            "参考图", "使用上传图片作为封面像素", "reference"
+        )
+        self.radio_cover_video = self.mode_video_frame.findChild(QtWidgets.QRadioButton)
+        self.radio_cover_ref = self.mode_ref_image.findChild(QtWidgets.QRadioButton)
+        self.radio_cover_video.setChecked(True)
+        self.cover_mode_group.addButton(self.radio_cover_video)
+        self.cover_mode_group.addButton(self.radio_cover_ref)
+        self.radio_cover_ref.toggled.connect(self._update_export_state)
+        layout.addWidget(self.mode_video_frame)
+        layout.addWidget(self.mode_ref_image)
+        layout.addStretch(1)
+
+        outer.addWidget(frame)
+        self.stack.addWidget(_wrap_scroll(page))
+
+    def _make_mode_option(
+        self, title: str, subtitle: str, value: str
+    ) -> QtWidgets.QFrame:
+        frame = QtWidgets.QFrame()
+        frame.setObjectName("modeOption")
+        row = QtWidgets.QHBoxLayout(frame)
+        row.setContentsMargins(12, 10, 12, 10)
+        radio = QtWidgets.QRadioButton()
+        radio.setProperty("cover_value", value)
+        copy = QtWidgets.QVBoxLayout()
+        copy.setSpacing(2)
+        strong = QtWidgets.QLabel(title)
+        strong.setStyleSheet("font-weight: 500;")
+        small = QtWidgets.QLabel(subtitle)
+        small.setObjectName("emptyHint")
+        copy.addWidget(strong)
+        copy.addWidget(small)
+        row.addWidget(radio)
+        row.addLayout(copy, 1)
+        radio.toggled.connect(lambda checked: self._sync_mode_frame(frame, checked))
+        return frame
+
+    def _sync_mode_frame(self, frame: QtWidgets.QFrame, checked: bool) -> None:
+        if checked:
+            frame.setObjectName("modeOptionSelected")
+        else:
+            radio = frame.findChild(QtWidgets.QRadioButton)
+            disabled = radio and not radio.isEnabled()
+            frame.setObjectName("modeOptionDisabled" if disabled else "modeOption")
+        frame.style().unpolish(frame)
+        frame.style().polish(frame)
+
+    # --- Step 2: 视频 ---
+    def _build_step_video(self) -> None:
+        page = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        frame, layout = _panel_frame()
+
+        self.video_drop = FileDropFrame(
+            "▷",
+            "拖入视频，或点击选择",
+            "MP4 · MOV · MKV · WebM · 文件不会离开本机",
+            VIDEO_SUFFIXES,
+        )
+        self.video_drop.activated.connect(self._pick_video)
+        self.video_drop.file_dropped.connect(self.load_video)
+        layout.addWidget(self.video_drop)
+
+        self.video_content = QtWidgets.QWidget()
+        vc = QtWidgets.QVBoxLayout(self.video_content)
+        vc.setContentsMargins(0, 0, 0, 0)
+        vc.setSpacing(12)
+
+        head = QtWidgets.QHBoxLayout()
+        head_left = QtWidgets.QVBoxLayout()
+        head_title = QtWidgets.QLabel("选取片段")
+        head_title.setObjectName("panelTitle")
+        self.lbl_meta_line = QtWidgets.QLabel()
+        self.lbl_meta_line.setObjectName("metaLine")
+        head_left.addWidget(head_title)
+        head_left.addWidget(self.lbl_meta_line)
+        btn_change_video = QtWidgets.QPushButton("换视频")
+        btn_change_video.setObjectName("ghostButton")
+        btn_change_video.clicked.connect(self._change_video)
+        head.addLayout(head_left, 1)
+        head.addWidget(btn_change_video)
+        vc.addLayout(head)
+
+        self.lbl_filename = QtWidgets.QLabel()
+        self.lbl_filename.setObjectName("filename")
+        self.lbl_filename.setWordWrap(True)
+        vc.addWidget(self.lbl_filename)
+
+        splitter = QtWidgets.QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
+
+        preview_wrap = QtWidgets.QWidget()
+        preview_layout = QtWidgets.QVBoxLayout(preview_wrap)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
         self.video_widget = QVideoWidget()
-        self.video_widget.setMinimumHeight(320)
-        v.addWidget(self.video_widget, 1)
+        self.video_widget.setMinimumHeight(180)
+        self.video_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding,
+        )
+        preview_layout.addWidget(self.video_widget, 1)
 
         self.player = QMediaPlayer(self)
         self.audio_out = QAudioOutput(self)
@@ -262,238 +642,313 @@ class SingleTab(QtWidgets.QWidget):
         self.player.positionChanged.connect(self._on_position)
         self.player.durationChanged.connect(self._on_duration)
 
-        # Playback controls
-        ctrl = QtWidgets.QHBoxLayout()
+        params_wrap = QtWidgets.QWidget()
+        params_layout = QtWidgets.QVBoxLayout(params_wrap)
+        params_layout.setContentsMargins(0, 0, 0, 0)
+        params_layout.setSpacing(10)
+
+        transport = QtWidgets.QHBoxLayout()
+        self.lbl_pos = QtWidgets.QLabel("0.00 / 0.00 秒")
+        self.lbl_pos.setObjectName("timecode")
+        self.btn_set_start = QtWidgets.QPushButton("设为起点")
+        self.btn_set_start.clicked.connect(self._set_start_from_preview)
+        self.btn_set_cover = QtWidgets.QPushButton("设为封面")
+        self.btn_set_cover.clicked.connect(self._set_cover_from_preview)
         self.btn_play = QtWidgets.QPushButton("播放")
         self.btn_play.clicked.connect(self._toggle_play)
-        self.btn_set_start = QtWidgets.QPushButton("此处设为起点")
-        self.btn_set_start.setToolTip("把当前预览位置设为 3 秒片段的起点")
-        self.btn_set_start.clicked.connect(self._set_start_from_preview)
-        self.btn_set_cover = QtWidgets.QPushButton("此处设为封面")
-        self.btn_set_cover.setToolTip("把当前预览位置设为静态封面帧")
-        self.btn_set_cover.clicked.connect(self._set_cover_from_preview)
-        self.lbl_pos = QtWidgets.QLabel("0.00 秒 / 0.00 秒")
-        ctrl.addWidget(self.btn_play)
-        ctrl.addWidget(self.btn_set_start)
-        ctrl.addWidget(self.btn_set_cover)
-        ctrl.addStretch(1)
-        ctrl.addWidget(self.lbl_pos)
-        v.addLayout(ctrl)
+        transport.addWidget(self.lbl_pos)
+        transport.addStretch(1)
+        transport.addWidget(self.btn_play)
+        transport.addWidget(self.btn_set_start)
+        transport.addWidget(self.btn_set_cover)
+        params_layout.addLayout(transport)
 
-        # Slider
         self.slider = QtWidgets.QSlider(Qt.Horizontal)
         self.slider.setRange(0, 0)
         self.slider.sliderMoved.connect(self._slider_seek)
-        v.addWidget(self.slider)
+        params_layout.addWidget(self.slider)
 
-        # Parameter form
-        form_box = QtWidgets.QGroupBox("片段参数")
-        form = QtWidgets.QFormLayout(form_box)
-
-        self.spin_start = QtWidgets.QDoubleSpinBox()
-        self.spin_start.setRange(0.0, 99999.0)
-        self.spin_start.setDecimals(2)
-        self.spin_start.setSuffix(" 秒")
-        self.spin_start.valueChanged.connect(self._sync_cover_default)
-        form.addRow("片段起点：", self.spin_start)
-
-        self.spin_duration = QtWidgets.QDoubleSpinBox()
-        self.spin_duration.setRange(0.5, 10.0)
-        self.spin_duration.setDecimals(2)
-        self.spin_duration.setValue(3.0)
-        self.spin_duration.setSuffix(" 秒")
-        form.addRow("片段时长：", self.spin_duration)
-
-        self.spin_cover = QtWidgets.QDoubleSpinBox()
-        self.spin_cover.setRange(0.0, 99999.0)
-        self.spin_cover.setDecimals(2)
-        self.spin_cover.setSuffix(" 秒")
-        self.spin_cover.valueChanged.connect(self._mark_cover_user_set)
-        form.addRow("封面帧位置：", self.spin_cover)
-
-        v.addWidget(form_box)
-
-        # Reference image + metadata
-        ref_box = QtWidgets.QGroupBox("参考原生图（可选）")
-        ref_layout = QtWidgets.QVBoxLayout(ref_box)
-        ref_row = QtWidgets.QHBoxLayout()
-        self.ref_edit = QtWidgets.QLineEdit()
-        self.ref_edit.setPlaceholderText("选择相机原图以移植 EXIF/IPTC…")
-        self.ref_edit.setReadOnly(True)
-        btn_ref = QtWidgets.QPushButton("选择参考图...")
-        btn_ref.clicked.connect(self._pick_reference)
-        btn_clear_ref = QtWidgets.QPushButton("清除")
-        btn_clear_ref.clicked.connect(self._clear_reference)
-        ref_row.addWidget(self.ref_edit, 1)
-        ref_row.addWidget(btn_ref)
-        btn_clear_ref.setObjectName("ghostButton")
-        ref_row.addWidget(btn_clear_ref)
-        ref_layout.addLayout(ref_row)
-
-        desc = QtWidgets.QLabel(
-            "上传手机相册里的普通照片（机内直出的 JPG / HEIC 等），"
-            "工具会读取 Make、Model、拍摄时间、GPS 等 EXIF 并移植到实况图。"
+        form_grid = QtWidgets.QGridLayout()
+        form_grid.setHorizontalSpacing(14)
+        form_grid.setVerticalSpacing(10)
+        self.spin_start = self._labeled_spin(
+            form_grid, 0, "片段起点", QtWidgets.QDoubleSpinBox,
+            suffix=" 秒", decimals=2, maximum=99999.0,
         )
-        desc.setObjectName("sectionDesc")
-        desc.setWordWrap(True)
-        ref_layout.addWidget(desc)
+        self.spin_start.valueChanged.connect(self._sync_cover_default)
+        self.spin_duration = self._labeled_spin(
+            form_grid, 1, "片段时长", QtWidgets.QDoubleSpinBox,
+            suffix=" 秒", decimals=2, minimum=0.5, maximum=10.0, value=3.0,
+        )
+        self.spin_cover = self._labeled_spin(
+            form_grid, 2, "封面位置", QtWidgets.QDoubleSpinBox,
+            suffix=" 秒", decimals=2, maximum=99999.0,
+        )
+        self.spin_cover.valueChanged.connect(self._mark_cover_user_set)
+        params_layout.addLayout(form_grid)
 
-        self.ref_chips_row = QtWidgets.QHBoxLayout()
-        self.ref_chips_row.setSpacing(6)
-        self.ref_chips_widget = QtWidgets.QWidget()
-        self.ref_chips_widget.setLayout(self.ref_chips_row)
-        self.ref_chips_widget.setVisible(False)
-        ref_layout.addWidget(self.ref_chips_widget)
-
-        self.cover_mode_group = QtWidgets.QButtonGroup(self)
-        self.radio_cover_video = QtWidgets.QRadioButton("封面来自视频帧")
-        self.radio_cover_ref = QtWidgets.QRadioButton("封面来自参考图")
-        self.radio_cover_video.setChecked(True)
-        self.cover_mode_group.addButton(self.radio_cover_video)
-        self.cover_mode_group.addButton(self.radio_cover_ref)
-        mode_row = QtWidgets.QHBoxLayout()
-        mode_row.addWidget(self.radio_cover_video)
-        mode_row.addWidget(self.radio_cover_ref)
-        ref_layout.addLayout(mode_row)
-
-        meta_scroll = QtWidgets.QScrollArea()
-        meta_scroll.setWidgetResizable(True)
-        meta_scroll.setMaximumHeight(220)
-        meta_widget = QtWidgets.QWidget()
-        meta_form = QtWidgets.QFormLayout(meta_widget)
-        self.meta_fields: dict[str, QtWidgets.QLineEdit] = {}
-        for key in ("Make", "Model", "DateTimeOriginal", "GPSLatitude", "GPSLongitude"):
-            edit = QtWidgets.QLineEdit()
-            edit.setPlaceholderText(key)
-            edit.textChanged.connect(self._on_meta_edit)
-            self.meta_fields[key] = edit
-            meta_form.addRow(f"{key}：", edit)
-        btn_reload_meta = QtWidgets.QPushButton("从参考图重新加载")
-        btn_reload_meta.setObjectName("ghostButton")
-        btn_reload_meta.clicked.connect(self._reload_metadata_from_reference)
-        meta_form.addRow("", btn_reload_meta)
-        meta_scroll.setWidget(meta_widget)
-        ref_layout.addWidget(QtWidgets.QLabel("原生数据（可编辑）："))
-        ref_layout.addWidget(meta_scroll)
-        v.addWidget(ref_box)
-
-        # Advanced
-        adv_box = QtWidgets.QGroupBox("高级参数（可选）")
-        adv_box.setCheckable(True)
-        adv_box.setChecked(False)
-        adv_layout = QtWidgets.QFormLayout(adv_box)
+        self.adv_box = QtWidgets.QGroupBox("编码参数")
+        self.adv_box.setCheckable(True)
+        self.adv_box.setChecked(False)
+        adv_form = QtWidgets.QFormLayout(self.adv_box)
         self.spin_long_edge = QtWidgets.QSpinBox()
         self.spin_long_edge.setRange(360, 4096)
         self.spin_long_edge.setValue(1920)
         self.spin_long_edge.setSuffix(" 像素")
-        adv_layout.addRow("输出长边：", self.spin_long_edge)
+        adv_form.addRow("输出长边：", self.spin_long_edge)
         self.spin_crf = QtWidgets.QSpinBox()
         self.spin_crf.setRange(14, 32)
         self.spin_crf.setValue(23)
         self.spin_crf.setToolTip("CRF 越小画质越好但文件越大")
-        adv_layout.addRow("视频 CRF：", self.spin_crf)
+        adv_form.addRow("视频 CRF：", self.spin_crf)
         self.spin_audio = QtWidgets.QSpinBox()
         self.spin_audio.setRange(64, 320)
         self.spin_audio.setValue(128)
         self.spin_audio.setSuffix(" kbps")
-        adv_layout.addRow("音频码率：", self.spin_audio)
-        v.addWidget(adv_box)
-        self.adv_box = adv_box
+        adv_form.addRow("音频码率：", self.spin_audio)
+        params_layout.addWidget(self.adv_box)
 
-        # Output
+        splitter.addWidget(preview_wrap)
+        splitter.addWidget(params_wrap)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        vc.addWidget(splitter, 1)
+
+        self.video_content.setVisible(False)
+        layout.addWidget(self.video_content)
+        layout.addStretch(1)
+
+        outer.addWidget(frame)
+        self.stack.addWidget(_wrap_scroll(page))
+
+    def _labeled_spin(
+        self,
+        grid: QtWidgets.QGridLayout,
+        row: int,
+        label: str,
+        cls: type,
+        **kwargs,
+    ):
+        lbl = QtWidgets.QLabel(label)
+        lbl.setObjectName("fieldLabel")
+        spin = cls()
+        for k, v in kwargs.items():
+            if hasattr(spin, k):
+                getattr(spin, f"set{k[0].upper()}{k[1:]}")(v)
+        unit = QtWidgets.QLabel("秒 · 建议 ≤3" if label == "片段时长" else "")
+        unit.setObjectName("emptyHint")
+        grid.addWidget(lbl, row, 0)
+        grid.addWidget(spin, row, 1)
+        grid.addWidget(unit, row, 2)
+        return spin
+
+    # --- Step 3: 元数据 ---
+    def _build_step_metadata(self) -> None:
+        page = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        frame, layout = _panel_frame()
+        head = QtWidgets.QHBoxLayout()
+        head_left = QtWidgets.QVBoxLayout()
+        title = QtWidgets.QLabel("原生数据")
+        title.setObjectName("panelTitle")
+        desc = QtWidgets.QLabel("编辑后将写入输出 JPEG。标黄字段表示已修改。")
+        desc.setObjectName("panelDesc")
+        head_left.addWidget(title)
+        head_left.addWidget(desc)
+        btn_reload = QtWidgets.QPushButton("从参考图加载")
+        btn_reload.clicked.connect(self._reload_metadata_from_reference)
+        self.btn_reload_meta = btn_reload
+        head.addLayout(head_left, 1)
+        head.addWidget(btn_reload)
+        layout.addLayout(head)
+
+        self.meta_search = QtWidgets.QLineEdit()
+        self.meta_search.setObjectName("searchInput")
+        self.meta_search.setPlaceholderText("搜索 Make、GPS、DateTime…")
+        self.meta_search.textChanged.connect(self._filter_meta_fields)
+        layout.addWidget(self.meta_search)
+
+        empty = QtWidgets.QLabel(
+            "未上传参考图时，可手动填写；上传后会自动解析填充。"
+        )
+        empty.setObjectName("emptyHint")
+        layout.addWidget(empty)
+
+        meta_body = QtWidgets.QHBoxLayout()
+        meta_body.setSpacing(20)
+        self.meta_group_btns: dict[str, QtWidgets.QPushButton] = {}
+        groups_col = QtWidgets.QVBoxLayout()
+        groups_col.setSpacing(4)
+        for gid, gtitle, _, _ in METADATA_GROUPS:
+            btn = QtWidgets.QPushButton(gtitle)
+            btn.setObjectName("groupBtn" if gid != "camera" else "groupBtnActive")
+            btn.setProperty("group_id", gid)
+            btn.clicked.connect(lambda _=False, g=gid: self._select_meta_group(g))
+            self.meta_group_btns[gid] = btn
+            groups_col.addWidget(btn)
+        sys_btn = QtWidgets.QPushButton("OPPO 系统")
+        sys_btn.setObjectName("groupBtn")
+        sys_btn.setProperty("group_id", "system")
+        sys_btn.clicked.connect(lambda: self._select_meta_group("system"))
+        self.meta_group_btns["system"] = sys_btn
+        groups_col.addWidget(sys_btn)
+        groups_col.addStretch(1)
+        meta_body.addLayout(groups_col)
+
+        self.meta_fields_stack = QtWidgets.QStackedWidget()
+        self.meta_fields: dict[str, QtWidgets.QLineEdit] = {}
+        self._meta_field_keys: dict[str, tuple[str, bool]] = {}
+
+        for gid, _, fields, is_iptc in METADATA_GROUPS:
+            gw = QtWidgets.QWidget()
+            gf = QtWidgets.QGridLayout(gw)
+            gf.setHorizontalSpacing(12)
+            gf.setVerticalSpacing(10)
+            for i, (key, flabel) in enumerate(fields):
+                lbl = QtWidgets.QLabel(flabel)
+                lbl.setObjectName("fieldLabel")
+                edit = QtWidgets.QLineEdit()
+                edit.setPlaceholderText(key.split(":")[-1])
+                edit.setProperty("meta_key", key)
+                edit.setProperty("meta_iptc", is_iptc)
+                edit.textChanged.connect(self._on_meta_edit)
+                self.meta_fields[key] = edit
+                self._meta_field_keys[key] = (gid, is_iptc)
+                row, col = divmod(i, 2)
+                gf.addWidget(lbl, row * 2, col)
+                gf.addWidget(edit, row * 2 + 1, col)
+            self.meta_fields_stack.addWidget(gw)
+
+        sys_w = QtWidgets.QWidget()
+        sys_f = QtWidgets.QFormLayout(sys_w)
+        uc = QtWidgets.QLineEdit(metadata.OPPO_USER_COMMENT)
+        uc.setReadOnly(True)
+        sys_f.addRow("UserComment（OPPO 识别标记）：", uc)
+        self.spin_presentation = QtWidgets.QSpinBox()
+        self.spin_presentation.setRange(0, 2_000_000_000)
+        self.spin_presentation.setSpecialValueText("自动计算")
+        self.spin_presentation.valueChanged.connect(self._on_presentation_edit)
+        sys_f.addRow("PresentationTimestampUs：", self.spin_presentation)
+        hint = QtWidgets.QLabel("微秒 · 封面在片段内的偏移")
+        hint.setObjectName("emptyHint")
+        sys_f.addRow("", hint)
+        self.meta_fields_stack.addWidget(sys_w)
+
+        meta_body.addWidget(self.meta_fields_stack, 1)
+        layout.addLayout(meta_body, 1)
+
+        outer.addWidget(frame)
+        self.stack.addWidget(_wrap_scroll(page))
+        self._select_meta_group("camera")
+
+    # --- Step 4: 导出 ---
+    def _build_step_export(self) -> None:
+        page = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        frame, layout = _panel_frame()
+        title = QtWidgets.QLabel("生成实况图")
+        title.setObjectName("panelTitle")
+        desc = QtWidgets.QLabel(
+            "封面、视频片段与元数据将在本地合成，输出 OPPO 相册可识别的 MotionPhoto JPEG。"
+        )
+        desc.setObjectName("panelDesc")
+        desc.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
         out_row = QtWidgets.QHBoxLayout()
+        out_lbl = QtWidgets.QLabel("输出路径：")
+        out_lbl.setObjectName("fieldLabel")
         self.out_edit = QtWidgets.QLineEdit()
-        self.out_edit.setPlaceholderText("输出路径（留空则自动生成）")
-        btn_browse = QtWidgets.QPushButton("...")
+        self.out_edit.setPlaceholderText("留空则与源视频同目录，自动生成 .live.jpg")
+        btn_browse = QtWidgets.QPushButton("…")
         btn_browse.setMaximumWidth(40)
         btn_browse.clicked.connect(self._pick_output)
-        out_row.addWidget(QtWidgets.QLabel("输出："))
+        out_row.addWidget(out_lbl)
         out_row.addWidget(self.out_edit, 1)
         out_row.addWidget(btn_browse)
-        v.addLayout(out_row)
+        layout.addLayout(out_row)
 
-        self.btn_convert = QtWidgets.QPushButton("导出实况图")
+        self.btn_convert = QtWidgets.QPushButton("开始转换")
         self.btn_convert.setObjectName("primaryButton")
         self.btn_convert.clicked.connect(self._do_convert)
-        v.addWidget(self.btn_convert)
+        layout.addWidget(self.btn_convert)
 
-        self.status = QtWidgets.QLabel("就绪")
-        self.status.setObjectName("statusLabel")
-        v.addWidget(self.status)
+        self.export_status = QtWidgets.QLabel("")
+        self.export_status.setObjectName("statusLabel")
+        layout.addWidget(self.export_status)
 
-    # --- video ---
-    def _pick_video(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "选择视频", "",
-            "视频文件 (*.mp4 *.mov *.mkv *.avi *.webm *.MP4 *.MOV);;所有文件 (*.*)"
+        self.export_progress = QtWidgets.QProgressBar()
+        self.export_progress.setRange(0, 0)
+        self.export_progress.setVisible(False)
+        layout.addWidget(self.export_progress)
+
+        self.log_edit = QtWidgets.QTextEdit()
+        self.log_edit.setObjectName("logBody")
+        self.log_edit.setReadOnly(True)
+        self.log_edit.setMaximumHeight(200)
+        self.log_edit.setVisible(False)
+        layout.addWidget(self.log_edit)
+
+        tip = QtWidgets.QLabel(
+            "用 USB、OPPO 互传或微信原图传到手机，放进 DCIM/Camera/。"
+            "普通微信 / QQ 图片会剥除元数据，相册无法识别实况。"
         )
-        if path:
-            self.load_video(Path(path))
+        tip.setObjectName("sectionDesc")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+        layout.addStretch(1)
 
-    def load_video(self, path: Path):
-        try:
-            info = ffmpeg_utils.probe(path)
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "读取视频信息失败", str(e))
-            return
-        self.video_path = path
-        self.video_info = info
-        self._cover_user_set = False
-        self.path_edit.setText(str(path))
-        self.player.setSource(QUrl.fromLocalFile(str(path)))
-        self.spin_start.setRange(0.0, max(0.0, info.duration - 0.5))
-        self.spin_cover.setRange(0.0, max(0.0, info.duration))
-        self.spin_start.setValue(0.0)
-        self.spin_cover.setValue(0.0)
-        self.spin_duration.setMaximum(min(10.0, info.duration))
-        if info.duration < 3.0:
-            self.spin_duration.setValue(max(0.5, info.duration))
-        else:
-            self.spin_duration.setValue(3.0)
-        self.status.setText(
-            f"已加载 {path.name}（{info.display_width}×{info.display_height}，"
-            f"{info.duration:.2f} 秒，旋转 {info.rotation}°）"
+        outer.addWidget(frame)
+        self.stack.addWidget(_wrap_scroll(page))
+
+    # --- Wizard navigation ---
+    def _prev_step(self) -> None:
+        if self._step > 1:
+            self._step -= 1
+            self._apply_step()
+
+    def _next_step(self) -> None:
+        if self._step < 4:
+            self._step += 1
+            self._apply_step()
+
+    def _apply_step(self) -> None:
+        self.stack.setCurrentIndex(self._step - 1)
+        self.step_indicator.set_current(self._step)
+        self.lbl_step_nav.setText(STEP_LABELS[self._step - 1])
+        self._update_nav()
+
+    def _update_nav(self) -> None:
+        self.btn_prev.setEnabled(self._step > 1 and not self._convert_running)
+        self.btn_next.setEnabled(self._step < 4 and not self._convert_running)
+
+    def _can_convert(self) -> bool:
+        if not self.video_path or not self.video_info:
+            return False
+        if self.radio_cover_ref.isChecked() and not self.reference_path:
+            return False
+        return True
+
+    def _update_export_state(self) -> None:
+        ref_ok = bool(self.reference_path)
+        self.radio_cover_ref.setEnabled(ref_ok)
+        self.mode_ref_image.setObjectName(
+            "modeOptionDisabled" if not ref_ok else "modeOption"
         )
+        if not ref_ok and self.radio_cover_ref.isChecked():
+            self.radio_cover_video.setChecked(True)
+        self._sync_mode_frame(self.mode_video_frame, self.radio_cover_video.isChecked())
+        self._sync_mode_frame(self.mode_ref_image, self.radio_cover_ref.isChecked())
+        self.btn_convert.setEnabled(self._can_convert() and not self._convert_running)
+        self.btn_reload_meta.setEnabled(bool(self.reference_bundle))
 
-    def _on_duration(self, ms: int):
-        self.slider.setRange(0, ms)
-
-    def _on_position(self, ms: int):
-        self.slider.setValue(ms)
-        dur = self.player.duration() / 1000.0
-        self.lbl_pos.setText(f"{ms/1000:.2f} 秒 / {dur:.2f} 秒")
-
-    def _slider_seek(self, ms: int):
-        self.player.setPosition(ms)
-
-    def _toggle_play(self):
-        if self.player.playbackState() == QMediaPlayer.PlayingState:
-            self.player.pause()
-            self.btn_play.setText("播放")
-        else:
-            self.player.play()
-            self.btn_play.setText("暂停")
-
-    def _set_start_from_preview(self):
-        t = self.player.position() / 1000.0
-        self.spin_start.setValue(t)
-
-    def _set_cover_from_preview(self):
-        t = self.player.position() / 1000.0
-        self._cover_user_set = True
-        self.spin_cover.setValue(t)
-
-    def _mark_cover_user_set(self):
-        # Triggered both by user spin and by _sync_cover_default; only mark
-        # as user-set when value differs from current start value.
-        if abs(self.spin_cover.value() - self.spin_start.value()) > 1e-3:
-            self._cover_user_set = True
-
-    def _sync_cover_default(self, v: float):
-        if not self._cover_user_set:
-            self.spin_cover.setValue(v)
-
-    def _pick_reference(self):
+    # --- Reference ---
+    def _pick_reference(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "选择参考原生图", "",
             "图片 (*.jpg *.jpeg *.heic *.heif *.png *.webp *.JPG *.JPEG *.HEIC *.HEIF);;所有文件 (*.*)"
@@ -501,20 +956,39 @@ class SingleTab(QtWidgets.QWidget):
         if path:
             self.load_reference(Path(path))
 
-    def load_reference(self, path: Path):
+    def load_reference(self, path: Path) -> None:
+        self.ref_drop.setVisible(False)
+        self.ref_preview.setVisible(False)
+        self.ref_parsing.setVisible(True)
+        self.ref_parsing.setText(f"正在解析 {path.name} …")
+        QtWidgets.QApplication.processEvents()
         try:
             bundle = metadata.parse_reference_image(path)
         except Exception as e:
+            self.ref_parsing.setVisible(False)
+            self.ref_drop.setVisible(True)
             QtWidgets.QMessageBox.critical(self, "读取参考图失败", str(e))
             return
         self.reference_path = path
         self.reference_bundle = bundle
         self.metadata_edits = metadata.NativeMetadataBundle()
-        self.ref_edit.setText(str(path))
+        self.ref_parsing.setVisible(False)
+        self.ref_preview.setVisible(True)
+        self.ref_name.setText(path.name)
         self._populate_meta_fields(bundle)
         self._update_ref_chips(path, bundle)
+        pix = QtGui.QPixmap(str(path))
+        if not pix.isNull():
+            self.ref_thumb.setPixmap(
+                pix.scaled(140, 140, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+        else:
+            self.ref_thumb.setText("预览")
+        self._update_export_state()
 
-    def _update_ref_chips(self, path: Path, bundle: metadata.NativeMetadataBundle) -> None:
+    def _update_ref_chips(
+        self, path: Path, bundle: metadata.NativeMetadataBundle
+    ) -> None:
         while self.ref_chips_row.count():
             item = self.ref_chips_row.takeAt(0)
             if item.widget():
@@ -535,65 +1009,202 @@ class SingleTab(QtWidgets.QWidget):
         if bundle.exif.get("Composite:GPSLatitude"):
             self.ref_chips_row.addWidget(_make_chip("GPS"))
         self.ref_chips_row.addStretch(1)
-        self.ref_chips_widget.setVisible(True)
 
-    def _clear_reference(self):
+    def _clear_reference(self) -> None:
         self.reference_path = None
         self.reference_bundle = None
         self.metadata_edits = metadata.NativeMetadataBundle()
-        self.ref_edit.clear()
+        self.ref_preview.setVisible(False)
+        self.ref_drop.setVisible(True)
+        self.ref_thumb.clear()
         for edit in self.meta_fields.values():
             edit.blockSignals(True)
             edit.clear()
+            edit.setObjectName("")
             edit.blockSignals(False)
         self.radio_cover_video.setChecked(True)
-        while self.ref_chips_row.count():
-            item = self.ref_chips_row.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self.ref_chips_widget.setVisible(False)
+        self._update_export_state()
 
-    def _populate_meta_fields(self, bundle: metadata.NativeMetadataBundle):
-        mapping = {
-            "Make": bundle.exif.get("EXIF:Make", ""),
-            "Model": bundle.exif.get("EXIF:Model", ""),
-            "DateTimeOriginal": bundle.exif.get("EXIF:DateTimeOriginal", ""),
-            "GPSLatitude": bundle.exif.get("Composite:GPSLatitude", ""),
-            "GPSLongitude": bundle.exif.get("Composite:GPSLongitude", ""),
-        }
+    # --- Video ---
+    def _pick_video(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择视频", "",
+            "视频文件 (*.mp4 *.mov *.mkv *.avi *.webm *.MP4 *.MOV);;所有文件 (*.*)"
+        )
+        if path:
+            self.load_video(Path(path))
+
+    def load_video(self, path: Path) -> None:
+        try:
+            info = ffmpeg_utils.probe(path)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "读取视频信息失败", str(e))
+            return
+        self.video_path = path
+        self.video_info = info
+        self._cover_user_set = False
+        self.video_drop.setVisible(False)
+        self.video_content.setVisible(True)
+        self.lbl_filename.setText(path.name)
+        self.lbl_meta_line.setText(
+            f"{info.display_width}×{info.display_height} · "
+            f"{info.codec.upper() if info.codec else '?'}"
+        )
+        self.player.setSource(QUrl.fromLocalFile(str(path)))
+        self.spin_start.setRange(0.0, max(0.0, info.duration - 0.5))
+        self.spin_cover.setRange(0.0, max(0.0, info.duration))
+        self.spin_start.setValue(0.0)
+        self.spin_cover.setValue(0.0)
+        self.spin_duration.setMaximum(min(10.0, info.duration))
+        if info.duration < 3.0:
+            self.spin_duration.setValue(max(0.5, info.duration))
+        else:
+            self.spin_duration.setValue(3.0)
+        self.export_status.setText(
+            f"已加载 {path.name}（{info.display_width}×{info.display_height}，"
+            f"{info.duration:.2f} 秒）"
+        )
+        self._update_export_state()
+
+    def _change_video(self) -> None:
+        self.player.stop()
+        self.video_path = None
+        self.video_info = None
+        self.video_content.setVisible(False)
+        self.video_drop.setVisible(True)
+        self._update_export_state()
+
+    def _on_duration(self, ms: int) -> None:
+        self.slider.setRange(0, ms)
+
+    def _on_position(self, ms: int) -> None:
+        self.slider.setValue(ms)
+        dur = self.player.duration() / 1000.0
+        self.lbl_pos.setText(f"{ms / 1000:.2f} / {dur:.2f} 秒")
+
+    def _slider_seek(self, ms: int) -> None:
+        self.player.setPosition(ms)
+
+    def _toggle_play(self) -> None:
+        if self.player.playbackState() == QMediaPlayer.PlayingState:
+            self.player.pause()
+            self.btn_play.setText("播放")
+        else:
+            self.player.play()
+            self.btn_play.setText("暂停")
+
+    def _set_start_from_preview(self) -> None:
+        t = self.player.position() / 1000.0
+        self.spin_start.setValue(t)
+
+    def _set_cover_from_preview(self) -> None:
+        t = self.player.position() / 1000.0
+        self._cover_user_set = True
+        self.spin_cover.setValue(t)
+
+    def _mark_cover_user_set(self) -> None:
+        if abs(self.spin_cover.value() - self.spin_start.value()) > 1e-3:
+            self._cover_user_set = True
+
+    def _sync_cover_default(self, v: float) -> None:
+        if not self._cover_user_set:
+            self.spin_cover.setValue(v)
+
+    # --- Metadata ---
+    def _select_meta_group(self, gid: str) -> None:
+        self._meta_group_id = gid
+        idx = len(METADATA_GROUPS) if gid == "system" else next(
+            i for i, (g, _, _, _) in enumerate(METADATA_GROUPS) if g == gid
+        )
+        self.meta_fields_stack.setCurrentIndex(idx)
+        for g, btn in self.meta_group_btns.items():
+            btn.setObjectName("groupBtnActive" if g == gid else "groupBtn")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        self._filter_meta_fields()
+
+    def _filter_meta_fields(self) -> None:
+        q = self.meta_search.text().strip().lower()
         for key, edit in self.meta_fields.items():
-            edit.blockSignals(True)
-            edit.setText(mapping.get(key, ""))
-            edit.blockSignals(False)
+            gid, _ = self._meta_field_keys[key]
+            if gid != self._meta_group_id:
+                continue
+            label = edit.property("meta_key") or key
+            visible = not q or q in key.lower() or q in label.lower()
+            edit.setVisible(visible)
+            parent = edit.parentWidget()
+            if parent:
+                for child in parent.findChildren(QtWidgets.QLabel):
+                    if child.objectName() == "fieldLabel":
+                        fl = child.text().lower()
+                        if edit.isVisible() and (not q or q in fl or q in key.lower()):
+                            child.setVisible(True)
+                        elif not q:
+                            child.setVisible(True)
 
-    def _reload_metadata_from_reference(self):
+    def _populate_meta_fields(self, bundle: metadata.NativeMetadataBundle) -> None:
+        for key, edit in self.meta_fields.items():
+            is_iptc = edit.property("meta_iptc")
+            if is_iptc:
+                val = bundle.iptc.get(key, "")
+            else:
+                val = bundle.exif.get(key, "")
+            edit.blockSignals(True)
+            edit.setText(val)
+            edit.blockSignals(False)
+        self._refresh_dirty_state()
+
+    def _reload_metadata_from_reference(self) -> None:
         if self.reference_bundle:
             self.metadata_edits = metadata.NativeMetadataBundle()
             self._populate_meta_fields(self.reference_bundle)
+            self.spin_presentation.setValue(0)
 
-    def _on_meta_edit(self):
-        exif_map = {
-            "Make": "EXIF:Make",
-            "Model": "EXIF:Model",
-            "DateTimeOriginal": "EXIF:DateTimeOriginal",
-            "GPSLatitude": "Composite:GPSLatitude",
-            "GPSLongitude": "Composite:GPSLongitude",
-        }
+    def _on_meta_edit(self) -> None:
         self.metadata_edits = metadata.NativeMetadataBundle()
         for key, edit in self.meta_fields.items():
             text = edit.text().strip()
-            if text:
-                self.metadata_edits.exif[exif_map[key]] = text
+            if not text:
+                continue
+            if edit.property("meta_iptc"):
+                self.metadata_edits.iptc[key] = text
+            else:
+                self.metadata_edits.exif[key] = text
+        self._refresh_dirty_state()
+
+    def _on_presentation_edit(self, v: int) -> None:
+        if v > 0:
+            self.metadata_edits.presentation_timestamp_us = v
+            self.metadata_edits.presentation_timestamp_user_set = True
+
+    def _refresh_dirty_state(self) -> None:
+        base = self.reference_bundle
+        for key, edit in self.meta_fields.items():
+            text = edit.text().strip()
+            if not base:
+                dirty = bool(text)
+            else:
+                is_iptc = edit.property("meta_iptc")
+                orig = base.iptc.get(key, "") if is_iptc else base.exif.get(key, "")
+                dirty = text != orig
+            edit.setObjectName("dirtyField" if dirty else "")
+            edit.style().unpolish(edit)
+            edit.style().polish(edit)
 
     def _build_metadata_for_mux(self) -> metadata.NativeMetadataBundle | None:
-        if not self.reference_bundle and not self.metadata_edits.exif:
+        if (
+            not self.reference_bundle
+            and not self.metadata_edits.exif
+            and not self.metadata_edits.iptc
+        ):
             return None
         base = self.reference_bundle or metadata.NativeMetadataBundle()
         return metadata.merge_bundles(base, self.metadata_edits)
 
-    # --- output ---
-    def _pick_output(self):
+    # --- Export ---
+    def _pick_output(self) -> None:
         if not self.video_path:
+            QtWidgets.QMessageBox.warning(self, "未选择视频", "请先在「视频」步骤选择视频。")
             return
         default = self.video_path.with_suffix(".live.jpg")
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -602,17 +1213,21 @@ class SingleTab(QtWidgets.QWidget):
         if path:
             self.out_edit.setText(path)
 
-    def _do_convert(self):
-        if not self.video_path:
-            QtWidgets.QMessageBox.warning(self, "未选择视频", "请先选择一个视频文件。")
+    def _do_convert(self) -> None:
+        if not self._can_convert():
+            if not self.video_path:
+                QtWidgets.QMessageBox.warning(self, "未选择视频", "请先在「视频」步骤选择视频。")
+            elif self.radio_cover_ref.isChecked() and not self.reference_path:
+                QtWidgets.QMessageBox.warning(
+                    self, "缺少参考图", "封面来自参考图时，请先在「原生图」步骤选择参考原生图。"
+                )
             return
-        if self.radio_cover_ref.isChecked() and not self.reference_path:
-            QtWidgets.QMessageBox.warning(
-                self, "缺少参考图", "封面来自参考图时，请先选择参考原生图。"
-            )
-            return
-        out = Path(self.out_edit.text()) if self.out_edit.text().strip() \
+        assert self.video_path is not None
+        out = (
+            Path(self.out_edit.text())
+            if self.out_edit.text().strip()
             else self.video_path.with_suffix(".live.jpg")
+        )
 
         cover_mode: metadata.CoverMode = (
             "reference" if self.radio_cover_ref.isChecked() else "video"
@@ -641,16 +1256,27 @@ class SingleTab(QtWidgets.QWidget):
         }
         if self.reference_path:
             params["reference_image"] = str(self.reference_path)
+
+        self._step = 4
+        self._apply_step()
         self._run_worker(self.video_path, out, params)
 
-    def _run_worker(self, video: Path, output: Path, params: ConvertParams):
+    def _run_worker(self, video: Path, output: Path, params: ConvertParams) -> None:
+        self._convert_running = True
         self.btn_convert.setEnabled(False)
-        self.status.setText("处理中...")
+        self.btn_convert.setText("正在合成…")
+        self.export_status.setText("处理中...")
+        self.export_progress.setVisible(True)
+        self.export_progress.setRange(0, 0)
+        self.log_edit.clear()
+        self.log_edit.setVisible(True)
+        self._update_nav()
+
         self.thread = QtCore.QThread(self)
         self.worker = ConvertWorker(video, output, params)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
-        self.worker.progress.connect(self.status.setText)
+        self.worker.progress.connect(self._on_progress)
         self.worker.finished.connect(self._on_done)
         self.worker.failed.connect(self._on_fail)
         self.worker.finished.connect(self.thread.quit)
@@ -658,17 +1284,33 @@ class SingleTab(QtWidgets.QWidget):
         self.thread.finished.connect(self.thread.deleteLater)
         self.thread.start()
 
-    def _on_done(self, out: Path):
+    def _on_progress(self, msg: str) -> None:
+        self.export_status.setText(msg)
+        self.log_edit.append(msg)
+
+    def _on_done(self, out: Path) -> None:
+        self._convert_running = False
         self.btn_convert.setEnabled(True)
+        self.btn_convert.setText("开始转换")
+        self.export_progress.setRange(0, 1)
+        self.export_progress.setValue(1)
         size_mb = out.stat().st_size / (1024 * 1024)
-        self.status.setText(f"完成 -> {out}（{size_mb:.2f} MB）")
+        self.export_status.setText(f"完成 · {size_mb:.2f} MB → {out}")
+        self._update_nav()
+        self._update_export_state()
         QtWidgets.QMessageBox.information(
             self, "成功", f"实况图已保存：\n{out}\n大小：{size_mb:.2f} MB"
         )
 
-    def _on_fail(self, msg: str):
+    def _on_fail(self, msg: str) -> None:
+        self._convert_running = False
         self.btn_convert.setEnabled(True)
-        self.status.setText("失败")
+        self.btn_convert.setText("开始转换")
+        self.export_progress.setVisible(False)
+        self.export_status.setText("转换失败")
+        self.log_edit.append(msg)
+        self._update_nav()
+        self._update_export_state()
         QtWidgets.QMessageBox.critical(self, "转换失败", msg)
 
 
@@ -745,7 +1387,6 @@ class BatchTab(QtWidgets.QWidget):
         out_row.addWidget(btn_browse)
         v.addLayout(out_row)
 
-        # Progress bar
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setValue(0)
@@ -890,6 +1531,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("OPPO 实况图制作工具")
+        self.setMinimumSize(720, 640)
         self.resize(900, 780)
 
         missing = ffmpeg_utils.check_dependencies()
