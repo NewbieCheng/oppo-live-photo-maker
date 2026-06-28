@@ -228,5 +228,5 @@ def test_write_motionphoto_with_reference_metadata(
 
     tags = json.loads(probe.stdout)[0]
     assert tags.get("Make") == "TestMake"
-    assert tags.get("MotionPhoto") == "1"
+    assert str(tags.get("MotionPhoto")) == "1"
     assert int(tags.get("VideoLength", 0)) == clip.stat().st_size
