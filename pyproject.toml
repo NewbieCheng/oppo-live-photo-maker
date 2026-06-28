@@ -54,6 +54,7 @@ build = [
 [project.scripts]
 oppo-live = "oppo_live_photo.cli:main_entry"
 oppo-live-backend = "oppo_live_photo.server:main"
+copy-img-meta = "oppo_live_photo.copy_img_meta_cli:main"
 
 [project.gui-scripts]
 oppo-live-gui = "oppo_live_photo.gui:main"

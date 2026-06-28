@@ -2,11 +2,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { CopyMetadataOptions } from "@shared/copyContract.js";
+import { isJpegFormat, detectFormatFromBytes } from "@shared/detectFormat.js";
 import {
   hasExifApp1Segment,
   needsColorOsExifResync,
   validateColorOsExif,
 } from "@shared/colorOsValidate.js";
+import {
+  needsExifByteOrderRealign,
+  realignExifFromJpegSource,
+} from "@shared/colorOsExifPatch.js";
 import {
   concatBytes,
   hasLikelyAppendedMp4,
@@ -19,7 +24,13 @@ import {
   stripMetadataForCopy,
   stripMpfApp2,
 } from "@shared/segments.js";
-import { findExiftool, readTagsJson, syncFullExifFromSource, tagsFromFileCopyDest } from "./exiftoolCli.js";
+import {
+  findExiftool,
+  readTagsJson,
+  supplementColorOsExif,
+  syncFullExifFromSource,
+  tagsFromFileCopyDest,
+} from "./exiftoolCli.js";
 
 export interface PostCopyResult {
   jpeg: Uint8Array;
@@ -54,6 +65,26 @@ export function postCopyPipeline(
   if (needsResync) {
     working = syncFullExifFromSource(working, sourcePath);
     working = stripMpfApp2(working);
+    tags = readTagsJson(working);
+  }
+
+  if (!options.excludeExif && exiftoolOk) {
+    let sourceTags: Record<string, unknown> = {};
+    let sourceJpeg: Uint8Array | undefined;
+    if (sourcePath && fs.existsSync(sourcePath)) {
+      sourceJpeg = new Uint8Array(fs.readFileSync(sourcePath));
+      sourceTags = readTagsJson(sourceJpeg);
+      const sourceFmt = detectFormatFromBytes(sourceJpeg, path.basename(sourcePath));
+      if (
+        isJpegFormat(sourceFmt) &&
+        needsExifByteOrderRealign(working, sourceTags, sourceJpeg)
+      ) {
+        working = realignExifFromJpegSource(working, sourceJpeg, options);
+        working = stripMpfApp2(working);
+        tags = readTagsJson(working);
+      }
+    }
+    working = supplementColorOsExif(working, tags, sourceTags, sourceJpeg);
     tags = readTagsJson(working);
   }
 

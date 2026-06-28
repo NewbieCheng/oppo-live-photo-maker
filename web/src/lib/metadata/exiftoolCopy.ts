@@ -11,7 +11,7 @@ import {
   validateColorOsExif,
   type ColorOsExifValidation,
 } from "./colorOsExif";
-import { buildTagsFromFileArgs, type CopyMetadataOptions } from "./copyContract";
+import { buildTagsFromFileArgs, vfsBasename, type CopyMetadataOptions } from "./copyContract";
 import { readExifByteOrder } from "./exifByteOrder";
 import { debugLog, wasmInFlightEnter, wasmInFlightLeave, wasmInFlightCount } from "./exiftoolDebug";
 import {
@@ -21,14 +21,21 @@ import {
 } from "./jpegTail";
 import {
   parseMetadataJson,
+  supplementColorOsExif,
   syncFullExifFromSource,
   tagsFromFileCopy,
+  tagsFromFileCopyWithFormat,
+  copyMakerNotesFromNonJpegSource,
   warmupExiftoolRuntime,
 } from "./exiftoolWasmRunner";
 import { withExiftoolLock } from "./exiftoolQueue";
 import { isJpegFormat, detectReferenceFormat } from "./imageFormat";
 import { bundleHasEditableFields } from "./parse";
 import { copyMetadataViaSegmentTransplant } from "./segmentCopy";
+import {
+  needsExifByteOrderRealign,
+  realignExifFromJpegSource,
+} from "@shared/colorOsExifPatch";
 import { stripMpfApp2 } from "./segments";
 
 type TagMap = Record<string, unknown>;
@@ -117,8 +124,10 @@ export async function copyViaExiftool(
 
       const bothJpeg = isJpegFormat(sourceFormat) && destIsJpeg;
       let copiedJpeg: Uint8Array;
+      let copyBranch = "unknown";
 
       if (bothJpeg) {
+        copyBranch = "bothJpeg-tagsFromFile";
         const destForCopy = new File([destWorking.slice()], destFile.name, {
           type: destFile.type || "image/jpeg",
         });
@@ -131,12 +140,14 @@ export async function copyViaExiftool(
           copiedJpeg = await syncFullExifFromSource(copiedJpeg, sourceFile);
         }
       } else if (isJpegFormat(sourceFormat)) {
+        copyBranch = "sourceJpeg-only-tagsFromFile";
         copiedJpeg = await tagsFromFileCopy(
           destFile,
           sourceFile,
           buildTagsFromFileArgs(options),
         );
       } else if (destIsJpeg) {
+        copyBranch = "destJpeg-segment-transplant";
         copiedJpeg = await copyMetadataViaSegmentTransplant(
           destWorking,
           sourceFile,
@@ -144,16 +155,49 @@ export async function copyViaExiftool(
           sourceFormat,
           options,
         );
+        if (
+          isJpegFormat(sourceFormat) &&
+          !options.excludeExif &&
+          needsExifByteOrderRealign(copiedJpeg, sourceTags, sourceBytes)
+        ) {
+          copiedJpeg = realignExifFromJpegSource(copiedJpeg, sourceBytes, options);
+          copiedJpeg = stripMpfApp2(copiedJpeg);
+        }
       } else {
-        copiedJpeg = await tagsFromFileCopy(
+        copyBranch = "fallback-tagsFromFile";
+        copiedJpeg = await tagsFromFileCopyWithFormat(
           destFile,
           sourceFile,
           buildTagsFromFileArgs(options),
+          options,
         );
       }
 
+      debugLog("H5", "exiftoolCopy.ts:copyViaExiftool", "copy-branch", {
+        copyBranch,
+        sourceFormat,
+        destFormat,
+        sourceName: sourceFile.name,
+        destName: destFile.name,
+        sourceSafe: vfsBasename(sourceFile.name),
+        destSafe: vfsBasename(destFile.name),
+      });
+
       if (destIsJpeg && !options.excludeExif) {
         copiedJpeg = stripMpfApp2(copiedJpeg);
+      }
+
+      if (
+        bothJpeg &&
+        destIsJpeg &&
+        !options.excludeExif &&
+        needsExifByteOrderRealign(copiedJpeg, sourceTags, sourceBytes)
+      ) {
+        copiedJpeg = realignExifFromJpegSource(copiedJpeg, sourceBytes, options);
+        copiedJpeg = stripMpfApp2(copiedJpeg);
+        debugLog("H6", "exiftoolCopy.ts:copyViaExiftool", "exif-byte-order-realign", {
+          byteOrder: readExifByteOrder(copiedJpeg),
+        });
       }
 
       if (destIsJpeg && !options.excludeExif && !hasExifApp1Segment(copiedJpeg)) {
@@ -163,10 +207,11 @@ export async function copyViaExiftool(
         const destForCopy = new File([copiedJpeg.slice()], destFile.name, {
           type: destFile.type || "image/jpeg",
         });
-        copiedJpeg = await tagsFromFileCopy(
+        copiedJpeg = await tagsFromFileCopyWithFormat(
           destForCopy,
           sourceFile,
           buildTagsFromFileArgs(options),
+          options,
         );
         copiedJpeg = await syncFullExifFromSource(copiedJpeg, sourceFile);
       }
@@ -227,6 +272,20 @@ export async function copyViaExiftool(
             hasMpf: hasMpfApp2Segment(copiedJpeg),
             interop: preTags["EXIF:InteropIndex"],
             ycbcr: preTags["IFD0:YCbCrPositioning"],
+          });
+        }
+
+        copiedJpeg = await supplementColorOsExif(copiedJpeg, preTags, sourceTags, sourceBytes);
+        debugLog("H5", "exiftoolCopy.ts:copyViaExiftool", "coloros-exif-supplement", {
+          byteOrder: readExifByteOrder(copiedJpeg),
+        });
+
+        if (!isJpegFormat(sourceFormat)) {
+          const byteOrder = readExifByteOrder(copiedJpeg) ?? "MM";
+          copiedJpeg = await copyMakerNotesFromNonJpegSource(copiedJpeg, sourceFile, byteOrder);
+          debugLog("H7", "exiftoolCopy.ts:copyViaExiftool", "maker-notes-copy", {
+            sourceFormat,
+            byteOrder,
           });
         }
       }

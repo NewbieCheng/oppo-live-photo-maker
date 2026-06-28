@@ -252,7 +252,9 @@ CI 在每次 push / PR 自动跑 ruff + pytest（Linux / macOS / Windows × Pyth
 
 - **JPEG 源** → 二进制 APP 段移植（与 live-photo-conv GExiv2 等价，保留 II 字节序 + MakerNotes）
 - **HEIC / TIFF / WebP / PNG 源** → [exiv2-wasm](https://github.com/gerosyab/exiv2-wasm) 读源写目标
-- **live.jpg** → 智能 MP4 尾部分割 + ColorOS EXIF 校验 + GCamera MicroVideo XMP 同步
+- **live.jpg** → 智能 MP4 尾部分割 + ColorOS EXIF 校验 + MotionPhoto XMP 同步（native / compat 双模式）
+
+**元数据编辑（功能三）** 支持修改 EXIF、IPTC、GCamera/OpCamera/Container/hdrgm XMP 及 UserComment；MakerNote 只读展示。详见 [docs/oppo-find-x8-metadata-reference.md](docs/oppo-find-x8-metadata-reference.md)。
 
 **1. 一键启动前后端**（后端 `http://localhost:28471`，前端 `http://localhost:5173`）：
 

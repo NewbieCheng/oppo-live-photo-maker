@@ -4,13 +4,20 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { copyImgMeta } from "../src/copyImgMeta.js";
 import { findExiftool, readTagsJson } from "../src/exiftoolCli.js";
+import { hasMpfApp2Segment } from "@shared/colorOsValidate.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "../..");
 const FIXTURE = path.join(REPO_ROOT, "tests", "fixtures", "output2.jpg");
 
-function microVideoOffset(tags: Record<string, unknown>): number {
-  for (const key of ["EXIF:MicroVideoOffset", "XMP-GCamera:MicroVideoOffset", "MicroVideoOffset"]) {
+function motionVideoLength(tags: Record<string, unknown>): number {
+  for (const key of [
+    "XMP-OpCamera:VideoLength",
+    "VideoLength",
+    "EXIF:MicroVideoOffset",
+    "XMP-GCamera:MicroVideoOffset",
+    "MicroVideoOffset",
+  ]) {
     const v = tags[key];
     if (v != null) return Number(v);
   }
@@ -23,12 +30,12 @@ describe("copyImgMeta output2 self-copy", () => {
     const beforeTags = readTagsJson(sourceBytes);
     const beforeSize = sourceBytes.length;
 
-    const result = await copyImgMeta(sourceBytes, sourceBytes, "output2.jpg", {
+    const result = await copyImgMeta(sourceBytes, sourceBytes, "output2.jpg", "output2.jpg", {
       excludeXmp: true,
     });
 
     expect(result.bytes.length).toBeGreaterThanOrEqual(beforeSize * 0.95);
-    expect(result.backendUsed).toBe("jpeg-segment-transplant");
+    expect(result.backendUsed).toBe("exiftool-tagsfromfile");
 
     const afterTags = readTagsJson(result.bytes);
     expect(afterTags["IFD0:Make"] ?? afterTags["EXIF:Make"]).toBe("OPPO");
@@ -37,8 +44,9 @@ describe("copyImgMeta output2 self-copy", () => {
     expect(
       afterTags["ExifIFD:InteropIndex"] ?? afterTags["EXIF:InteropIndex"],
     ).toBeTruthy();
-    expect(microVideoOffset(afterTags)).toBeGreaterThan(1_000_000);
-    expect(microVideoOffset(afterTags)).toBe(microVideoOffset(beforeTags));
+    expect(hasMpfApp2Segment(result.bytes)).toBe(false);
+    expect(motionVideoLength(afterTags)).toBeGreaterThan(1_000_000);
+    expect(motionVideoLength(afterTags)).toBe(motionVideoLength(beforeTags));
   });
 
   it("findExiftool locates bundled binary on Windows", () => {

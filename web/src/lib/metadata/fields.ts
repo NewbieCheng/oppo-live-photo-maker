@@ -1,7 +1,13 @@
+import { emptyXmpBundle, type NativeMetadataBundle } from "./types";
+
+export { emptyXmpBundle };
+
 export interface MetadataFieldDef {
   key: string;
   label: string;
   placeholder?: string;
+  iptc?: boolean;
+  xmp?: "gcamera" | "opcamera" | "container" | "hdrgm" | "coloros";
 }
 
 export interface MetadataFieldGroup {
@@ -41,7 +47,7 @@ export const METADATA_FIELD_GROUPS: MetadataFieldGroup[] = [
       { key: "DateTimeOriginal", label: "拍摄时间", placeholder: "2024:01:01 12:00:00" },
       { key: "CreateDate", label: "创建时间" },
       { key: "ModifyDate", label: "修改时间" },
-      { key: "OffsetTimeOriginal", label: "时区偏移" },
+      { key: "OffsetTimeOriginal", label: "时区偏移", placeholder: "+08:00" },
     ],
   },
   {
@@ -55,32 +61,84 @@ export const METADATA_FIELD_GROUPS: MetadataFieldGroup[] = [
     ],
   },
   {
-    id: "other",
-    title: "其他",
-    fields: [{ key: "UserComment", label: "UserComment（OPPO 识别）" }],
+    id: "coloros",
+    title: "ColorOS 结构",
+    fields: [
+      { key: "InteropIndex", label: "InteropIndex", placeholder: "R98", xmp: "coloros" },
+      { key: "InteropVersion", label: "InteropVersion", placeholder: "0100", xmp: "coloros" },
+      { key: "YCbCrPositioning", label: "YCbCrPositioning", placeholder: "Centered", xmp: "coloros" },
+      { key: "ExifImageWidth", label: "ExifImageWidth", xmp: "coloros" },
+      { key: "ExifImageHeight", label: "ExifImageHeight", xmp: "coloros" },
+    ],
+  },
+  {
+    id: "oppo_exif",
+    title: "OPPO EXIF",
+    fields: [
+      {
+        key: "UserComment",
+        label: "UserComment（OPPO 识别）",
+        placeholder: "oplus_9127854112 或 Oplus_8388608",
+      },
+    ],
+  },
+  {
+    id: "gcamera",
+    title: "GCamera XMP",
+    fields: [
+      { key: "MotionPhoto", label: "MotionPhoto", placeholder: "1", xmp: "gcamera" },
+      { key: "MotionPhotoVersion", label: "MotionPhotoVersion", placeholder: "1", xmp: "gcamera" },
+      {
+        key: "MotionPhotoPresentationTimestampUs",
+        label: "PresentationTimestampUs (μs)",
+        xmp: "gcamera",
+      },
+      { key: "MicroVideo", label: "MicroVideo (compat)", placeholder: "1", xmp: "gcamera" },
+      { key: "MicroVideoVersion", label: "MicroVideoVersion", placeholder: "1", xmp: "gcamera" },
+      { key: "MicroVideoOffset", label: "MicroVideoOffset", xmp: "gcamera" },
+    ],
+  },
+  {
+    id: "opcamera",
+    title: "OpCamera XMP",
+    fields: [
+      { key: "MotionPhotoOwner", label: "MotionPhotoOwner", placeholder: "oplus", xmp: "opcamera" },
+      { key: "OLivePhotoVersion", label: "OLivePhotoVersion", placeholder: "2", xmp: "opcamera" },
+      { key: "VideoLength", label: "VideoLength (bytes)", xmp: "opcamera" },
+      { key: "MotionPhotoFeatureFlag", label: "MotionPhotoFeatureFlag", placeholder: "1", xmp: "opcamera" },
+      {
+        key: "MotionPhotoPrimaryPresentationTimestampUs",
+        label: "PrimaryPresentationTimestampUs",
+        xmp: "opcamera",
+      },
+    ],
+  },
+  {
+    id: "container",
+    title: "Container XMP",
+    fields: [
+      { key: "gainMapLength", label: "GainMap Length (bytes)", xmp: "container" },
+      { key: "videoLength", label: "MotionPhoto Length (bytes)", xmp: "container" },
+    ],
+  },
+  {
+    id: "hdrgm",
+    title: "HDR (hdrgm)",
+    fields: [{ key: "version", label: "hdrgm:Version", placeholder: "1.0", xmp: "hdrgm" }],
   },
   {
     id: "iptc",
     title: "IPTC",
     fields: [
-      { key: "Keywords", label: "关键词" },
-      { key: "Caption-Abstract", label: "说明" },
-      { key: "CopyrightNotice", label: "版权" },
+      { key: "Keywords", label: "关键词", iptc: true },
+      { key: "Caption-Abstract", label: "说明", iptc: true },
+      { key: "CopyrightNotice", label: "版权", iptc: true },
     ],
   },
 ];
 
-export const OPPO_SYSTEM_FIELDS = [
-  {
-    key: "UserComment",
-    label: "UserComment（OPPO 识别标记）",
-    value: "Oplus_8388608",
-    readonly: true,
-  },
-] as const;
-
 export const ALL_EDITABLE_EXIF_KEYS = METADATA_FIELD_GROUPS.flatMap((g) =>
-  g.id === "iptc" ? [] : g.fields.map((f) => f.key),
+  g.fields.filter((f) => !f.iptc && !f.xmp).map((f) => f.key),
 );
 
 export const ALL_EDITABLE_IPTC_KEYS = METADATA_FIELD_GROUPS.find((g) => g.id === "iptc")!.fields.map(
@@ -88,10 +146,8 @@ export const ALL_EDITABLE_IPTC_KEYS = METADATA_FIELD_GROUPS.find((g) => g.id ===
 );
 
 export function emptyBundle(): NativeMetadataBundle {
-  return { exif: {}, iptc: {} };
+  return { exif: {}, iptc: {}, xmp: emptyXmpBundle() };
 }
-
-import type { NativeMetadataBundle } from "./types";
 
 export function mergeBundles(
   base: NativeMetadataBundle,
@@ -100,9 +156,15 @@ export function mergeBundles(
   return {
     exif: { ...base.exif, ...edits.exif },
     iptc: { ...base.iptc, ...edits.iptc },
-    presentationTimestampUs: edits.presentationTimestampUserSet
-      ? edits.presentationTimestampUs
-      : base.presentationTimestampUs ?? edits.presentationTimestampUs,
+    xmp: {
+      gcamera: { ...base.xmp?.gcamera, ...edits.xmp?.gcamera },
+      opcamera: { ...base.xmp?.opcamera, ...edits.xmp?.opcamera },
+      container: { ...base.xmp?.container, ...edits.xmp?.container },
+      hdrgm: { ...base.xmp?.hdrgm, ...edits.xmp?.hdrgm },
+      mode: edits.xmp?.mode ?? base.xmp?.mode ?? "native",
+    },
+    makerNoteJson: edits.makerNoteJson ?? base.makerNoteJson,
+    presentationTimestampUs: edits.presentationTimestampUs ?? base.presentationTimestampUs,
     presentationTimestampUserSet:
       edits.presentationTimestampUserSet ?? base.presentationTimestampUserSet,
   };

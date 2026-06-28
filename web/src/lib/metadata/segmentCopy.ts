@@ -2,10 +2,12 @@
  * GExiv2-style metadata copy: transplant raw APP segments instead of rewriting EXIF in place.
  * Preserves little-endian (II) TIFF structure, MakerNotes binary, and Interop IFD.
  */
-import { minimalJpeg } from "./apply";
-import { buildTagsFromFileArgs, type CopyMetadataOptions } from "./copyContract";
+import { buildSyntheticReferenceJpeg } from "./apply";
+import type { CopyMetadataOptions } from "./copyContract";
+import { parsedExiftoolTagsToBundle } from "./copyWritableTags";
+import { agentLog } from "./exiftoolDebug";
+import { parseMetadataJson, syncFullExifFromSource } from "./exiftoolWasmRunner";
 import { readExifByteOrder } from "./exifByteOrder";
-import { syncFullExifFromSource, tagsFromFileCopy } from "./exiftoolWasmRunner";
 import { isJpegFormat, type ReferenceImageFormat } from "./imageFormat";
 import {
   extractMetadataSegments,
@@ -21,27 +23,32 @@ function segmentOptions(options: CopyMetadataOptions) {
   };
 }
 
-/** Materialize metadata APP segments from HEIC/PNG/WebP via ExifTool on a minimal JPEG canvas. */
+/** Materialize metadata APP segments from HEIC/PNG/WebP via piexif (ExifTool write breaks on canvas). */
 async function materializeMetadataSegmentsFromSource(
   sourceFile: File,
   options: CopyMetadataOptions,
 ): Promise<Uint8Array[]> {
-  let canvas = await tagsFromFileCopy(
-    new File([minimalJpeg().slice()], "canvas.jpg", { type: "image/jpeg" }),
-    sourceFile,
-    buildTagsFromFileArgs(options),
-  );
-
-  if (!options.excludeExif) {
-    canvas = await syncFullExifFromSource(canvas, sourceFile);
-  }
-
+  const parsed = await parseMetadataJson<Record<string, unknown>[]>(sourceFile, [
+    "-json",
+    "-G1",
+    "-U",
+  ]);
+  const tags = parsed[0] ?? {};
+  const bundle = parsedExiftoolTagsToBundle(tags, options);
+  const hasUserComment = Boolean(bundle.exif.UserComment);
+  const canvas = buildSyntheticReferenceJpeg(bundle, !hasUserComment);
+  agentLog("H3", "segmentCopy.ts:materializeMetadataSegmentsFromSource", "piexif canvas", {
+    sourceOriginal: sourceFile.name,
+    exifFields: Object.keys(bundle.exif).length,
+    method: "piexif-synthetic",
+    runId: "post-fix-v2",
+  });
   return extractMetadataSegments(canvas, segmentOptions(options));
 }
 
 /**
  * Copy metadata by transplanting APP segments (matches live-photo-conv GExiv2 save_file).
- * JPEG sources use raw segment bytes; other formats materialize via ExifTool then transplant.
+ * JPEG sources use raw segment bytes; other formats materialize via piexif then transplant.
  */
 export async function copyMetadataViaSegmentTransplant(
   destJpeg: Uint8Array,
@@ -66,9 +73,7 @@ export async function copyMetadataViaSegmentTransplant(
   let working = stripMetadataForCopy(destJpeg, opts);
   working = insertAfterAppSegments(working, segments);
 
-  if (!options.excludeExif && !isJpegFormat(sourceFormat)) {
-    working = await syncFullExifFromSource(working, sourceFile);
-  } else if (!options.excludeExif && readExifByteOrder(working) === "MM") {
+  if (!options.excludeExif && isJpegFormat(sourceFormat) && readExifByteOrder(working) === "MM") {
     working = await syncFullExifFromSource(working, sourceFile);
   }
 

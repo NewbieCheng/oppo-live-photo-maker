@@ -1,23 +1,21 @@
 /**
  * OPPO MotionPhoto muxer (browser, pure TS — no exiftool dependency).
  *
- * Produces the same byte layout as the Python implementation:
- *
- *   [JPEG:
- *      SOI
- *      APP1 (EXIF with UserComment = "Oplus_8388608")
- *      APP1 (XMP — GCamera + OpCamera + Container/Item)
- *      APP2 (MPF — NumberOfImages = 1, Baseline MP Primary)
- *      ... rest of original JPEG ...
- *      EOI ]
+ *   [JPEG: SOI + APP1 EXIF + APP1 XMP + optional APP2 MPF + ... + EOI]
  *   [ MP4 trailer ]
- *
- * Feature-one (video → live photo) follows Young-Spark/oppo-live-photo-maker upstream.
  */
+import {
+  buildMotionPhotoXmpApp1,
+  buildMotionPhotoXmpPacket,
+  rebuildMotionPhotoXmpInJpeg,
+  type MotionPhotoXmpMode,
+} from "@shared/motionPhotoXmp";
+import { isExifApp1, scanJpegSegments } from "@shared/segments";
 
-export { rebuildMotionPhotoXmpInJpeg } from "@shared/motionPhotoXmp";
+export { rebuildMotionPhotoXmpInJpeg };
 
 const enc = new TextEncoder();
+const DEFAULT_USER_COMMENT = "Oplus_8388608";
 
 function concat(...parts: Uint8Array[]): Uint8Array {
   const total = parts.reduce((n, p) => n + p.length, 0);
@@ -67,7 +65,6 @@ function findInsertionPoint(jpeg: Uint8Array): number {
   return lastAppEnd;
 }
 
-/** Strip any existing APP1/APP2 (EXIF/XMP/MPF) segments so re-muxing stays clean. */
 function stripExistingMetadata(jpeg: Uint8Array): Uint8Array {
   if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
     throw new Error("Not a JPEG: missing SOI marker");
@@ -99,9 +96,17 @@ function stripExistingMetadata(jpeg: Uint8Array): Uint8Array {
   return jpeg;
 }
 
-function buildExifApp1(): Uint8Array {
+/** Keep rich EXIF from cover when metadata was applied before mux. */
+function extractExifApp1Segment(jpeg: Uint8Array): Uint8Array | null {
+  for (const seg of scanJpegSegments(jpeg)) {
+    if (isExifApp1(seg)) return seg.payload.slice();
+  }
+  return null;
+}
+
+function buildExifApp1(userComment = DEFAULT_USER_COMMENT): Uint8Array {
   const ASCII_PREFIX = enc.encode("ASCII\0\0\0");
-  const COMMENT = enc.encode("Oplus_8388608");
+  const COMMENT = enc.encode(userComment);
   const userCommentValue = concat(ASCII_PREFIX, COMMENT);
 
   const tiff: number[] = [0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00];
@@ -146,72 +151,6 @@ function buildExifApp1(): Uint8Array {
   return concat(new Uint8Array([0xff, 0xe1]), writeU16BE(segLen), segBody);
 }
 
-export interface XmpFields {
-  videoLength: number;
-  presentationTimestampUs?: number;
-}
-
-function buildXmpPacket(fields: XmpFields): string {
-  const ts = fields.presentationTimestampUs ?? 0;
-  const len = fields.videoLength;
-  return (
-    `<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>\n` +
-    `<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="oppo-live-photo-web">\n` +
-    ` <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n` +
-    `  <rdf:Description rdf:about=""\n` +
-    `    xmlns:GCamera="http://ns.google.com/photos/1.0/camera/"\n` +
-    `    xmlns:OpCamera="http://ns.oplus.com/photos/1.0/camera/"\n` +
-    `    xmlns:Container="http://ns.google.com/photos/1.0/container/"\n` +
-    `    xmlns:Item="http://ns.google.com/photos/1.0/container/item/"\n` +
-    `    GCamera:MotionPhoto="1"\n` +
-    `    GCamera:MotionPhotoVersion="1"\n` +
-    `    GCamera:MotionPhotoPresentationTimestampUs="${ts}"\n` +
-    `    OpCamera:MotionPhotoPrimaryPresentationTimestampUs="${ts}"\n` +
-    `    OpCamera:MotionPhotoOwner="oplus"\n` +
-    `    OpCamera:OLivePhotoVersion="2"\n` +
-    `    OpCamera:VideoLength="${len}"\n` +
-    `    OpCamera:MotionPhotoFeatureFlag="1">\n` +
-    `   <Container:Directory>\n` +
-    `    <rdf:Seq>\n` +
-    `     <rdf:li rdf:parseType="Resource">\n` +
-    `      <Container:Item rdf:parseType="Resource">\n` +
-    `       <Item:Mime>image/jpeg</Item:Mime>\n` +
-    `       <Item:Semantic>Primary</Item:Semantic>\n` +
-    `       <Item:Length>0</Item:Length>\n` +
-    `       <Item:Padding>0</Item:Padding>\n` +
-    `      </Container:Item>\n` +
-    `     </rdf:li>\n` +
-    `     <rdf:li rdf:parseType="Resource">\n` +
-    `      <Container:Item rdf:parseType="Resource">\n` +
-    `       <Item:Mime>video/mp4</Item:Mime>\n` +
-    `       <Item:Semantic>MotionPhoto</Item:Semantic>\n` +
-    `       <Item:Length>${len}</Item:Length>\n` +
-    `       <Item:Padding>0</Item:Padding>\n` +
-    `      </Container:Item>\n` +
-    `     </rdf:li>\n` +
-    `    </rdf:Seq>\n` +
-    `   </Container:Directory>\n` +
-    `  </rdf:Description>\n` +
-    ` </rdf:RDF>\n` +
-    `</x:xmpmeta>\n` +
-    `<?xpacket end="w"?>`
-  );
-}
-
-const XMP_NS_URI = "http://ns.adobe.com/xap/1.0/\0";
-
-function buildXmpApp1(fields: XmpFields): Uint8Array {
-  const xmp = buildXmpPacket(fields);
-  const xmpBytes = enc.encode(xmp);
-  const headerBytes = enc.encode(XMP_NS_URI);
-  const body = concat(headerBytes, xmpBytes);
-  if (body.length > 65533) {
-    throw new Error("XMP packet exceeds APP1 size limit (extended XMP not supported)");
-  }
-  const segLen = body.length + 2;
-  return concat(new Uint8Array([0xff, 0xe1]), writeU16BE(segLen), body);
-}
-
 function buildMpfSegment(imageSize: number): Uint8Array {
   const tiff = new Uint8Array([0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08]);
   const entries: number[] = [];
@@ -248,44 +187,51 @@ function buildMpfSegment(imageSize: number): Uint8Array {
 
 export interface MuxOptions {
   presentationTimestampUs?: number;
+  xmpMode?: MotionPhotoXmpMode;
+  gainMapLength?: number;
+  hdrgmVersion?: string;
+  userComment?: string;
+  /** Legacy compat: insert APP2 MPF (OPPO native live photos typically omit MPF). */
+  includeMpf?: boolean;
 }
 
-/** Feature-one entry: video cover + clip → OPPO MotionPhoto (Young-Spark upstream). */
 export function buildOppoMotionPhoto(
   coverJpeg: Uint8Array,
   videoMp4: Uint8Array,
   options: MuxOptions = {},
 ): Uint8Array {
+  const preservedExif = extractExifApp1Segment(coverJpeg);
   const cleanJpeg = stripExistingMetadata(coverJpeg);
-  const exif = buildExifApp1();
-  const xmp = buildXmpApp1({
+  const exif =
+    preservedExif ?? buildExifApp1(options.userComment ?? DEFAULT_USER_COMMENT);
+  const xmp = buildMotionPhotoXmpApp1({
     videoLength: videoMp4.length,
     presentationTimestampUs: options.presentationTimestampUs ?? 0,
+    mode: options.xmpMode ?? "native",
+    gainMapLength: options.gainMapLength,
+    hdrgmVersion: options.hdrgmVersion,
   });
 
   const insAfterSoi = findInsertionPoint(cleanJpeg);
-  const withMeta = concat(
+  let withMeta = concat(
     cleanJpeg.subarray(0, insAfterSoi),
     exif,
     xmp,
     cleanJpeg.subarray(insAfterSoi),
   );
 
-  const dummyMpf = buildMpfSegment(0);
-  const finalSize = withMeta.length + dummyMpf.length;
-  const mpf = buildMpfSegment(finalSize);
-  if (mpf.length !== dummyMpf.length) {
-    throw new Error("MPF segment size shifted during build");
+  if (options.includeMpf) {
+    const dummyMpf = buildMpfSegment(0);
+    const finalSize = withMeta.length + dummyMpf.length;
+    const mpf = buildMpfSegment(finalSize);
+    if (mpf.length !== dummyMpf.length) {
+      throw new Error("MPF segment size shifted during build");
+    }
+    const insAfterMeta = findInsertionPoint(withMeta);
+    withMeta = concat(withMeta.subarray(0, insAfterMeta), mpf, withMeta.subarray(insAfterMeta));
   }
 
-  const insAfterMeta = findInsertionPoint(withMeta);
-  const finalJpeg = concat(
-    withMeta.subarray(0, insAfterMeta),
-    mpf,
-    withMeta.subarray(insAfterMeta),
-  );
-
-  return concat(finalJpeg, videoMp4);
+  return concat(withMeta, videoMp4);
 }
 
 export const _internal = {
@@ -293,6 +239,6 @@ export const _internal = {
   stripExistingMetadata,
   buildMpfSegment,
   buildExifApp1,
-  buildXmpApp1,
-  buildXmpPacket,
+  buildMotionPhotoXmpApp1,
+  buildMotionPhotoXmpPacket,
 };

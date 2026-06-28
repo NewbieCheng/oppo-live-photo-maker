@@ -170,6 +170,8 @@ def write_oppo_motionphoto(
     reference_jpg: str | Path | None = None,
     metadata_overrides: NativeMetadataBundle | None = None,
     cover_mode: str = "video",
+    xmp_mode: str = "native",
+    include_mpf: bool = False,
 ) -> Path:
     """Produce an OPPO MotionPhoto JPEG.
 
@@ -213,48 +215,49 @@ def write_oppo_motionphoto(
                 preserve_orientation=(cover_mode == "reference"),
             )
 
-        # Single exiftool invocation: strip-then-inject in one process call.
-        _run(
-            [
-                exiftool, "-config", config, "-overwrite_original",
-                # 1. Strip prior XMP/MPF/Trailer to avoid duplicates.
-                "-XMP:all=", "-MPF:all=", "-Trailer:all=",
-                # 2. Inject EXIF + XMP metadata expected by OPPO Photos.
-                "-EXIF:UserComment=Oplus_8388608",
-                # XMP - GCamera (Google MotionPhoto core + legacy MicroVideo)
-                "-XMP-GCamera:MotionPhoto=1",
-                "-XMP-GCamera:MotionPhotoVersion=1",
-                f"-XMP-GCamera:MotionPhotoPresentationTimestampUs={ts}",
+        user_comment = "Oplus_8388608"
+        if metadata_overrides is not None and metadata_overrides.exif.get("UserComment"):
+            user_comment = str(metadata_overrides.exif["UserComment"])
+
+        xmp_args = [
+            exiftool, "-config", config, "-overwrite_original", "-api", "ByteOrder=II",
+            "-XMP:all=", "-MPF:all=", "-Trailer:all=",
+            f"-EXIF:UserComment={user_comment}",
+            "-XMP-GCamera:MotionPhoto=1",
+            "-XMP-GCamera:MotionPhotoVersion=1",
+            f"-XMP-GCamera:MotionPhotoPresentationTimestampUs={ts}",
+            f"-XMP-OpCamera:MotionPhotoPrimaryPresentationTimestampUs={ts}",
+            "-XMP-OpCamera:MotionPhotoOwner=oplus",
+            "-XMP-OpCamera:OLivePhotoVersion=2",
+            f"-XMP-OpCamera:VideoLength={video_size}",
+            "-XMP-OpCamera:MotionPhotoFeatureFlag=1",
+            "-XMP-Container:Directory+={Item={Mime=image/jpeg,"
+            "Semantic=Primary,Length=0,Padding=0}}",
+            f"-XMP-Container:Directory+={{Item={{Mime=video/mp4,"
+            f"Semantic=MotionPhoto,Length={video_size},Padding=0}}}}",
+            str(work_jpg),
+        ]
+        if xmp_mode == "compat":
+            xmp_args[8:8] = [
                 "-XMP-GCamera:MicroVideo=1",
                 "-XMP-GCamera:MicroVideoVersion=1",
                 f"-XMP-GCamera:MicroVideoOffset={video_size}",
                 f"-XMP-GCamera:MicroVideoPresentationTimestampUs={ts}",
-                # XMP - OpCamera (OPPO private)
-                f"-XMP-OpCamera:MotionPhotoPrimaryPresentationTimestampUs={ts}",
-                "-XMP-OpCamera:MotionPhotoOwner=oplus",
-                "-XMP-OpCamera:OLivePhotoVersion=2",
-                f"-XMP-OpCamera:VideoLength={video_size}",
-                "-XMP-OpCamera:MotionPhotoFeatureFlag=1",
-                # XMP - Container directory: Primary JPEG + MotionPhoto MP4.
-                "-XMP-Container:Directory+={Item={Mime=image/jpeg,"
-                "Semantic=Primary,Length=0,Padding=0}}",
-                f"-XMP-Container:Directory+={{Item={{Mime=video/mp4,"
-                f"Semantic=MotionPhoto,Length={video_size},Padding=0}}}}",
-                str(work_jpg),
             ]
-        )
+        _run(xmp_args)
 
         photo_bytes = work_jpg.read_bytes()
 
-    # 3. Insert MPF APP2 segment (NumberOfImages=1)
-    test_seg = _build_mpf_segment(0)
-    final_jpeg_size = len(photo_bytes) + len(test_seg)
-    mpf_seg = _build_mpf_segment(final_jpeg_size)
-    if len(mpf_seg) != len(test_seg):
-        raise RuntimeError("MPF segment size shifted during build")
-
-    ins_pos = _find_app_insertion_point(photo_bytes)
-    new_jpeg = photo_bytes[:ins_pos] + mpf_seg + photo_bytes[ins_pos:]
+    if include_mpf:
+        test_seg = _build_mpf_segment(0)
+        final_jpeg_size = len(photo_bytes) + len(test_seg)
+        mpf_seg = _build_mpf_segment(final_jpeg_size)
+        if len(mpf_seg) != len(test_seg):
+            raise RuntimeError("MPF segment size shifted during build")
+        ins_pos = _find_app_insertion_point(photo_bytes)
+        new_jpeg = photo_bytes[:ins_pos] + mpf_seg + photo_bytes[ins_pos:]
+    else:
+        new_jpeg = photo_bytes
 
     # 4. Append MP4 and write final file
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -294,6 +297,7 @@ def rebuild_motionphoto_xmp_in_jpeg(
     *,
     video_length: int,
     presentation_timestamp_us: int = 0,
+    xmp_mode: str = "native",
 ) -> Path:
     """Re-write MotionPhoto XMP/MPF on an existing JPEG (keep EXIF/IPTC).
 
@@ -308,28 +312,41 @@ def rebuild_motionphoto_xmp_in_jpeg(
     video_size = max(0, int(video_length))
     ts = max(0, int(presentation_timestamp_us))
 
-    _run(
-        [
-            exiftool,
-            "-config",
-            config,
-            "-overwrite_original",
-            "-XMP:all=",
-            "-MPF:all=",
-            "-Trailer:all=",
-            "-XMP-GCamera:MotionPhoto=1",
-            "-XMP-GCamera:MotionPhotoVersion=1",
-            f"-XMP-GCamera:MotionPhotoPresentationTimestampUs={-1 if ts == 0 else ts}",
+    ts = max(0, int(presentation_timestamp_us))
+    ts_val = ts if ts > 0 else 0
+
+    args = [
+        exiftool,
+        "-config",
+        config,
+        "-overwrite_original",
+        "-api",
+        "ByteOrder=II",
+        "-XMP:all=",
+        "-MPF:all=",
+        "-Trailer:all=",
+        "-XMP-GCamera:MotionPhoto=1",
+        "-XMP-GCamera:MotionPhotoVersion=1",
+        f"-XMP-GCamera:MotionPhotoPresentationTimestampUs={ts_val}",
+        f"-XMP-OpCamera:MotionPhotoPrimaryPresentationTimestampUs={ts_val}",
+        "-XMP-OpCamera:MotionPhotoOwner=oplus",
+        "-XMP-OpCamera:OLivePhotoVersion=2",
+        f"-XMP-OpCamera:VideoLength={video_size}",
+        "-XMP-OpCamera:MotionPhotoFeatureFlag=1",
+        "-XMP-Container:Directory+={Item={Mime=image/jpeg,"
+        "Semantic=Primary,Length=0,Padding=0}}",
+        f"-XMP-Container:Directory+={{Item={{Mime=video/mp4,"
+        f"Semantic=MotionPhoto,Length={video_size},Padding=0}}}}",
+        str(jpeg_path),
+    ]
+    if xmp_mode == "compat":
+        insert_at = args.index(f"-XMP-GCamera:MotionPhotoPresentationTimestampUs={ts_val}") + 1
+        args[insert_at:insert_at] = [
             "-XMP-GCamera:MicroVideo=1",
             "-XMP-GCamera:MicroVideoVersion=1",
             f"-XMP-GCamera:MicroVideoOffset={video_size}",
-            f"-XMP-GCamera:MicroVideoPresentationTimestampUs={-1 if ts == 0 else ts}",
-            "-XMP-Container:Directory+={Item={Mime=image/jpeg,"
-            "Semantic=Primary,Length=0,Padding=0}}",
-            f"-XMP-Container:Directory+={{Item={{Mime=video/mp4,"
-            f"Semantic=MotionPhoto,Length={video_size},Padding=0}}}}",
-            str(jpeg_path),
+            f"-XMP-GCamera:MicroVideoPresentationTimestampUs={ts_val}",
         ]
-    )
+    _run(args)
 
     return jpeg_path

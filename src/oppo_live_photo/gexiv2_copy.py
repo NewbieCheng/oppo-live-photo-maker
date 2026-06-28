@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -77,6 +78,16 @@ def _candidate_binaries(name: str) -> list[Path]:
                 root / "build" / exe,
                 root / "_build" / "src" / exe,
                 root / "_build" / exe,
+            ]
+        )
+
+    if sys.platform == "win32":
+        home = Path.home()
+        candidates.extend(
+            [
+                home / "msys64" / "ucrt64" / "bin" / exe,
+                home / "msys64" / "msys64" / "ucrt64" / "bin" / exe,
+                Path("C:/msys64/ucrt64/bin") / exe,
             ]
         )
     return candidates
@@ -160,8 +171,7 @@ def _materialize_metadata_jpeg(
         canvas.write_bytes(_jpeg_seg.minimal_jpeg())
         cmd = [
             str(exiftool),
-            "-api",
-            "ByteOrder=II",
+            *_byte_order_api(exiftool, source),
             "-overwrite_original",
             "-TagsFromFile",
             str(source),
@@ -202,6 +212,40 @@ def _tag_value(tags: dict, *keys: str) -> object | None:
     return None
 
 
+def _parse_exif_byte_order_label(value: object | None) -> str | None:
+    if value is None or value == "":
+        return None
+    s = str(value).strip().upper()
+    if s == "II" or "INTEL" in s or "LITTLE" in s:
+        return "II"
+    if s == "MM" or "MOTOROLA" in s or "BIG" in s:
+        return "MM"
+    return None
+
+
+def _infer_copy_exif_byte_order(source_tags: dict, source_bytes: bytes | None = None) -> str:
+    from_tags = _parse_exif_byte_order_label(
+        _tag_value(source_tags, "File:ExifByteOrder", "ExifByteOrder")
+    )
+    if from_tags:
+        return from_tags
+    if source_bytes is not None:
+        from_jpeg = _jpeg_seg.read_exif_byte_order(source_bytes)
+        if from_jpeg:
+            return from_jpeg
+    make = str(_tag_value(source_tags, "IFD0:Make", "EXIF:Make", "Make") or "")
+    if "oppo" in make.lower():
+        return "MM"
+    return "II"
+
+
+def _byte_order_api(exiftool: Path, source: Path) -> list[str]:
+    src_bytes = source.read_bytes()
+    tags = _read_tags_json(exiftool, src_bytes)
+    order = _infer_copy_exif_byte_order(tags, src_bytes)
+    return ["-api", f"ByteOrder={order}"]
+
+
 def _has_exif_app1(jpeg: bytes) -> bool:
     return any(_jpeg_seg.is_exif_app1(seg) for seg in _jpeg_seg.scan_jpeg_segments(jpeg))
 
@@ -235,12 +279,8 @@ def _validate_coloros_exif(
     tag_map = tags or {}
     issues: list[str] = []
     byte_order = _jpeg_seg.read_exif_byte_order(jpeg)
-    if byte_order != "II":
-        issues.append(
-            "ExifByteOrder 为大端 (MM)，ColorOS 需要小端 (II)"
-            if byte_order == "MM"
-            else "缺少 EXIF APP1 或无法读取 ExifByteOrder"
-        )
+    if byte_order is None:
+        issues.append("缺少 EXIF APP1 或无法读取 ExifByteOrder")
     if _tag_value(tag_map, "EXIF:InteropIndex", "InteropIndex", "ExifIFD:InteropIndex") is None:
         issues.append("缺少 InteropIndex（Interop IFD）")
     if _tag_value(
@@ -258,21 +298,35 @@ def _validate_coloros_exif(
     if _has_mpf_app2(jpeg):
         issues.append("存在 APP2 MPF 段（OPPO 原片通常无 MPF）")
     if motion_photo:
+        motion_photo_tag = _tag_value(tag_map, "XMP-GCamera:MotionPhoto", "MotionPhoto")
+        op_video_length = _tag_value(tag_map, "XMP-OpCamera:VideoLength", "VideoLength")
+        container_dir = _tag_value(tag_map, "XMP-Container:Directory", "Container:Directory")
         micro_video = _tag_value(tag_map, "XMP-GCamera:MicroVideo", "MicroVideo")
         micro_offset = _tag_value(tag_map, "XMP-GCamera:MicroVideoOffset", "MicroVideoOffset")
-        op_video_length = _tag_value(tag_map, "XMP-OpCamera:VideoLength", "VideoLength")
-        if micro_video is None and micro_offset is None:
-            issues.append("缺少 GCamera MicroVideo / MicroVideoOffset XMP")
-        if (
-            trailing_length is not None
-            and micro_offset is not None
-            and int(micro_offset) != trailing_length
-        ):
-            issues.append(
-                f"MicroVideoOffset ({micro_offset}) 与 MP4 尾部 ({trailing_length}) 不一致"
-            )
-        if op_video_length is not None and micro_video is None:
-            issues.append("存在 OpCamera VideoLength 但缺少 GCamera MicroVideo XMP")
+        xmp_mode = "compat" if micro_video is not None else "native"
+
+        if motion_photo_tag is None:
+            issues.append("缺少 GCamera MotionPhoto XMP")
+        if op_video_length is None:
+            issues.append("缺少 OpCamera VideoLength XMP")
+        if trailing_length is not None and op_video_length is not None:
+            if int(op_video_length) != trailing_length:
+                issues.append(
+                    f"OpCamera VideoLength ({op_video_length}) 与 MP4 尾部 ({trailing_length}) 不一致"
+                )
+        if xmp_mode == "compat":
+            if micro_video is None and micro_offset is None:
+                issues.append("compat 模式缺少 GCamera MicroVideo / MicroVideoOffset XMP")
+            if (
+                trailing_length is not None
+                and micro_offset is not None
+                and int(micro_offset) != trailing_length
+            ):
+                issues.append(
+                    f"MicroVideoOffset ({micro_offset}) 与 MP4 尾部 ({trailing_length}) 不一致"
+                )
+        elif container_dir is None:
+            issues.append("native 模式缺少 Container:Directory XMP")
     return {"ok": not issues, "issues": issues, "exif_byte_order": byte_order}
 
 
@@ -282,8 +336,6 @@ def _needs_coloros_exif_resync(
     *,
     require_maker_notes: bool = False,
 ) -> bool:
-    if _jpeg_seg.read_exif_byte_order(jpeg) != "II":
-        return True
     tag_map = tags or {}
     if _tag_value(tag_map, "EXIF:InteropIndex", "InteropIndex", "ExifIFD:InteropIndex") is None:
         return True
@@ -315,8 +367,7 @@ def _tags_from_file_copy(
         dest.write_bytes(dest_jpeg)
         cmd = [
             str(exiftool),
-            "-api",
-            "ByteOrder=II",
+            *_byte_order_api(exiftool, source),
             "-TagsFromFile",
             str(source),
             *_build_tags_from_file_args(
@@ -385,6 +436,26 @@ def _post_copy_pipeline(
             working = _sync_full_exif_from_source(exiftool, working, source)
             tags = _read_tags_json(exiftool, working)
 
+        source_bytes = source.read_bytes()
+        source_tags = _read_tags_json(exiftool, source_bytes)
+        if _jpeg_seg.is_jpeg_bytes(source_bytes):
+            desired = _infer_copy_exif_byte_order(source_tags, source_bytes)
+            current = _jpeg_seg.read_exif_byte_order(working)
+            if current is not None and current != desired:
+                working = _realign_exif_from_jpeg_source(
+                    working,
+                    source_bytes,
+                    exclude_exif=exclude_exif,
+                    exclude_xmp=exclude_xmp,
+                    exclude_iptc=exclude_iptc,
+                )
+                tags = _read_tags_json(exiftool, working)
+
+        working = _supplement_coloros_exif(
+            exiftool, working, tags, source_tags, source_bytes
+        )
+        tags = _read_tags_json(exiftool, working)
+
     if motion and exiftool is not None:
         with tempfile.TemporaryDirectory(prefix="oppo-xmp-") as td:
             live_jpeg = Path(td) / "live.jpg"
@@ -422,8 +493,7 @@ def _sync_full_exif_from_source(exiftool: Path, dest_jpeg: bytes, source: Path) 
         dest.write_bytes(dest_jpeg)
         cmd = [
             str(exiftool),
-            "-api",
-            "ByteOrder=II",
+            *_byte_order_api(exiftool, source),
             "-TagsFromFile",
             str(source),
             *EXIF_RESYNC_GROUPS,
@@ -434,6 +504,176 @@ def _sync_full_exif_from_source(exiftool: Path, dest_jpeg: bytes, source: Path) 
         ]
         _run_exiftool(cmd)
         return out.read_bytes()
+
+
+def _read_jpeg_dimensions(jpeg: bytes) -> tuple[int, int] | None:
+    i = 2
+    n = len(jpeg)
+    while i < n - 1:
+        if jpeg[i] != 0xff:
+            i += 1
+            continue
+        m = jpeg[i + 1]
+        if m in (0xd9, 0xda):
+            break
+        if m == 0x01 or (0xd0 <= m <= 0xd7):
+            i += 2
+            continue
+        if (
+            0xc0 <= m <= 0xc3
+            or 0xc5 <= m <= 0xc7
+            or 0xc9 <= m <= 0xcb
+            or 0xcd <= m <= 0xcf
+        ):
+            if i + 8 >= n:
+                return None
+            height = (jpeg[i + 5] << 8) | jpeg[i + 6]
+            width = (jpeg[i + 7] << 8) | jpeg[i + 8]
+            if width > 0 and height > 0:
+                return width, height
+            return None
+        if i + 3 >= n:
+            break
+        length = (jpeg[i + 2] << 8) | jpeg[i + 3]
+        if length < 2:
+            break
+        i += 2 + length
+    return None
+
+
+def _plan_coloros_exif_supplement(
+    jpeg: bytes,
+    dest_tags: dict,
+    source_tags: dict | None = None,
+    source_bytes: bytes | None = None,
+) -> dict[str, object]:
+    plan: dict[str, object] = {}
+    src = source_tags or {}
+    desired = _infer_copy_exif_byte_order(src, source_bytes)
+    current = _jpeg_seg.read_exif_byte_order(jpeg)
+    if current is not None and current != desired:
+        plan["byte_order"] = desired
+    elif current is None and desired:
+        plan["byte_order"] = desired
+
+    if _tag_value(
+        dest_tags,
+        "InteropIFD:InteropIndex",
+        "EXIF:InteropIndex",
+        "InteropIndex",
+        "ExifIFD:InteropIndex",
+    ) is None:
+        src_interop = _tag_value(
+            src,
+            "InteropIFD:InteropIndex",
+            "EXIF:InteropIndex",
+            "InteropIndex",
+            "ExifIFD:InteropIndex",
+        )
+        plan["interop_index"] = (
+            "R98"
+            if src_interop is not None and str(src_interop).startswith("R98")
+            else (str(src_interop) if src_interop is not None else "R98")
+        )
+        src_ver = _tag_value(
+            src,
+            "InteropIFD:InteropVersion",
+            "EXIF:InteropVersion",
+            "InteropVersion",
+        )
+        plan["interop_version"] = str(src_ver) if src_ver is not None else "0100"
+    elif _tag_value(dest_tags, "InteropIFD:InteropVersion", "EXIF:InteropVersion", "InteropVersion") is None:
+        src_ver = _tag_value(
+            src,
+            "InteropIFD:InteropVersion",
+            "EXIF:InteropVersion",
+            "InteropVersion",
+        )
+        plan["interop_version"] = str(src_ver) if src_ver is not None else "0100"
+    if _tag_value(dest_tags, "IFD0:YCbCrPositioning", "EXIF:YCbCrPositioning", "YCbCrPositioning") is None:
+        plan["ycbcr_positioning"] = 1
+    dims = _read_jpeg_dimensions(jpeg)
+    if dims:
+        width, height = dims
+        exif_w = _tag_value(
+            dest_tags,
+            "ExifIFD:ExifImageWidth",
+            "EXIF:ExifImageWidth",
+            "ExifImageWidth",
+        )
+        exif_h = _tag_value(
+            dest_tags,
+            "ExifIFD:ExifImageHeight",
+            "EXIF:ExifImageHeight",
+            "ExifImageHeight",
+        )
+        try:
+            if exif_w is None or int(exif_w) <= 0 or int(exif_w) != width:
+                plan["exif_image_width"] = width
+            if exif_h is None or int(exif_h) <= 0 or int(exif_h) != height:
+                plan["exif_image_height"] = height
+        except (TypeError, ValueError):
+            plan["exif_image_width"] = width
+            plan["exif_image_height"] = height
+    return plan
+
+
+def _supplement_coloros_exif(
+    exiftool: Path,
+    dest_jpeg: bytes,
+    dest_tags: dict | None = None,
+    source_tags: dict | None = None,
+    source_bytes: bytes | None = None,
+) -> bytes:
+    tag_map = dest_tags or _read_tags_json(exiftool, dest_jpeg)
+    plan = _plan_coloros_exif_supplement(dest_jpeg, tag_map, source_tags, source_bytes)
+    if not plan:
+        return dest_jpeg
+    with tempfile.TemporaryDirectory(prefix="oppo-supp-") as td:
+        td_path = Path(td)
+        dest = td_path / "dest.jpg"
+        dest.write_bytes(dest_jpeg)
+        cmd = [str(exiftool), "-m"]
+        if "byte_order" in plan:
+            cmd.extend(["-api", f"ByteOrder={plan['byte_order']}"])
+        if "interop_index" in plan:
+            cmd.append(f"-InteropIndex={plan['interop_index']}")
+        if "interop_version" in plan:
+            cmd.append(f"-InteropVersion={plan['interop_version']}")
+        if "ycbcr_positioning" in plan:
+            cmd.append(f"-YCbCrPositioning={plan['ycbcr_positioning']}")
+        if "exif_image_width" in plan:
+            cmd.append(f"-ExifImageWidth={plan['exif_image_width']}")
+        if "exif_image_height" in plan:
+            cmd.append(f"-ExifImageHeight={plan['exif_image_height']}")
+        cmd.extend(["-overwrite_original", str(dest)])
+        _run_exiftool(cmd)
+        return dest.read_bytes()
+
+
+def _realign_exif_from_jpeg_source(
+    dest_jpeg: bytes,
+    source_jpeg: bytes,
+    *,
+    exclude_exif: bool,
+    exclude_xmp: bool,
+    exclude_iptc: bool,
+) -> bytes:
+    segments = _jpeg_seg.extract_metadata_segments(
+        source_jpeg,
+        exclude_exif=exclude_exif,
+        exclude_xmp=exclude_xmp,
+        exclude_iptc=exclude_iptc,
+    )
+    if not segments:
+        return dest_jpeg
+    working = _jpeg_seg.strip_metadata_for_copy(
+        dest_jpeg,
+        exclude_exif=exclude_exif,
+        exclude_xmp=exclude_xmp,
+        exclude_iptc=exclude_iptc,
+    )
+    return _jpeg_seg.insert_after_app_segments(working, segments)
 
 
 def _copy_via_segment_transplant(
@@ -550,6 +790,21 @@ def _gexiv2_bindings_available() -> bool:
         return False
 
 
+def _msys_root_from_ucrt_binary(binary: Path) -> Path | None:
+    parts = binary.parts
+    for idx, part in enumerate(parts):
+        if part.lower() == "ucrt64":
+            return Path(*parts[:idx])
+    return None
+
+
+def _win_to_msys(path: Path) -> str:
+    resolved = str(path.resolve())
+    if len(resolved) >= 2 and resolved[1] == ":":
+        return f"/{resolved[0].lower()}/{resolved[2:].replace(chr(92), '/')}"
+    return resolved.replace("\\", "/")
+
+
 def _run_copy_img_meta_binary(
     binary: Path,
     source: Path,
@@ -559,14 +814,25 @@ def _run_copy_img_meta_binary(
     exclude_xmp: bool,
     exclude_iptc: bool,
 ) -> None:
-    cmd = [str(binary)]
+    flags: list[str] = []
     if exclude_exif:
-        cmd.append("--exclude-exif")
+        flags.append("--exclude-exif")
     if exclude_xmp:
-        cmd.append("--exclude-xmp")
+        flags.append("--exclude-xmp")
     if exclude_iptc:
-        cmd.append("--exclude-iptc")
-    cmd.extend([str(source), str(dest)])
+        flags.append("--exclude-iptc")
+
+    msys_root = _msys_root_from_ucrt_binary(binary) if sys.platform == "win32" else None
+    bash = (msys_root / "usr" / "bin" / "bash.exe") if msys_root else None
+    if bash is not None and bash.is_file():
+        cli_args = flags + [_win_to_msys(source), _win_to_msys(dest)]
+        bash_cmd = "copy-img-meta " + " ".join(shlex.quote(a) for a in cli_args)
+        env = os.environ.copy()
+        env["MSYSTEM"] = "UCRT64"
+        cmd = [str(bash), "--login", "-lc", bash_cmd]
+    else:
+        cmd = [str(binary), *flags, str(source), str(dest)]
+
     try:
         proc = subprocess.run(
             cmd,
@@ -574,6 +840,7 @@ def _run_copy_img_meta_binary(
             capture_output=True,
             text=True,
             creationflags=_CREATE_NO_WINDOW,
+            env=env if bash is not None and bash.is_file() else None,
         )
     except subprocess.CalledProcessError as e:
         detail = (e.stderr or e.stdout or "").strip() or "(no output)"

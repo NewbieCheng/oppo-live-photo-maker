@@ -78,7 +78,7 @@ describe("hasExifApp1Segment", () => {
 });
 
 describe("needsColorOsExifResync", () => {
-  it("flags MM byte order", () => {
+  it("flags missing Interop on MM EXIF", () => {
     const segMm = exifApp1Ii("OPPO", "Find");
     segMm[10] = 0x4d;
     segMm[11] = 0x4d;
@@ -125,17 +125,21 @@ describe("needsColorOsExifResync", () => {
 });
 
 describe("validateColorOsExif", () => {
-  it("reports MM byte order issue", () => {
+  it("accepts MM byte order when Interop structure is present", () => {
     const segMm = exifApp1Ii("OPPO", "Find");
     segMm[10] = 0x4d;
     segMm[11] = 0x4d;
     const mm = insertAfterAppSegments(tinyJpeg(), [segMm]);
-    const result = validateColorOsExif(mm, { "EXIF:Make": "OPPO" });
-    expect(result.ok).toBe(false);
-    expect(result.issues.some((i) => i.includes("MM"))).toBe(true);
+    const result = validateColorOsExif(mm, {
+      "EXIF:InteropIndex": "R98",
+      "IFD0:YCbCrPositioning": "Centered",
+      "MakerNotes:Version": "1",
+    });
+    expect(result.exifByteOrder).toBe("MM");
+    expect(result.issues.some((i) => i.includes("MM"))).toBe(false);
   });
 
-  it("flags MicroVideoOffset mismatch on motion photos", () => {
+  it("flags MicroVideoOffset mismatch on compat motion photos", () => {
     const ii = insertAfterAppSegments(tinyJpeg(), [exifApp1Ii("OPPO", "Find X8")]);
     const result = validateColorOsExif(
       ii,
@@ -143,12 +147,32 @@ describe("validateColorOsExif", () => {
         "EXIF:InteropIndex": "R98",
         "IFD0:YCbCrPositioning": "Centered",
         "MakerNotes:Version": "1",
+        "XMP-GCamera:MicroVideo": 1,
         "XMP-GCamera:MicroVideoOffset": 100,
+        "XMP-GCamera:MotionPhoto": 1,
+        "XMP-OpCamera:VideoLength": 100,
       },
-      { motionPhoto: true, trailingLength: 999 },
+      { motionPhoto: true, trailingLength: 999, xmpMode: "compat" },
     );
     expect(result.ok).toBe(false);
     expect(result.issues.some((i) => i.includes("MicroVideoOffset"))).toBe(true);
+  });
+
+  it("validates native motion photo without MicroVideo", () => {
+    const ii = insertAfterAppSegments(tinyJpeg(), [exifApp1Ii("OPPO", "Find X8")]);
+    const result = validateColorOsExif(
+      ii,
+      {
+        "EXIF:InteropIndex": "R98",
+        "IFD0:YCbCrPositioning": "Centered",
+        "MakerNotes:Version": "1",
+        "XMP-GCamera:MotionPhoto": 1,
+        "XMP-OpCamera:VideoLength": 999,
+        "XMP-Container:Directory": "Seq",
+      },
+      { motionPhoto: true, trailingLength: 999, xmpMode: "native" },
+    );
+    expect(result.issues.some((i) => i.includes("MicroVideo"))).toBe(false);
   });
 });
 

@@ -3,6 +3,7 @@ import { computed } from "vue";
 import MetadataEditor from "./MetadataEditor.vue";
 import {
   computeDirtyKeys,
+  computeSpoofDirtyKeys,
   type NativeMetadataBundle,
   type ParseSummary,
 } from "../lib/metadata";
@@ -14,17 +15,27 @@ const props = defineProps<{
   referenceBundle: NativeMetadataBundle | null;
   edits: NativeMetadataBundle;
   summary: ParseSummary | null;
+  sourceLabel?: string;
+  allowReload?: boolean;
+  spoofOnly?: boolean;
 }>();
 
 const emit = defineEmits<{
   "update:open": [boolean];
   "update:edits": [NativeMetadataBundle];
   reloadFromReference: [];
+  resetTemplate: [];
 }>();
 
-const dirtyKeys = computed(() => computeDirtyKeys(props.referenceBundle, props.edits));
+const dirtyKeys = computed(() =>
+  props.spoofOnly
+    ? computeSpoofDirtyKeys(props.referenceBundle, props.edits)
+    : computeDirtyKeys(props.referenceBundle, props.edits),
+);
 
 const editCount = computed(() => dirtyKeys.value.size);
+
+const reloadEnabled = computed(() => props.allowReload !== false);
 
 function toggleOpen() {
   emit("update:open", !props.open);
@@ -61,13 +72,17 @@ function toggleOpen() {
     </div>
 
     <div v-else-if="open && referenceBundle" class="meta-editor-wrap">
+      <p v-if="sourceLabel" class="source-label">{{ sourceLabel }}</p>
       <MetadataEditor
         compact
         :reference-bundle="referenceBundle"
         :edits="edits"
         :dirty-keys="dirtyKeys"
+        :allow-reload="reloadEnabled"
+        :spoof-only="spoofOnly"
         @update:edits="emit('update:edits', $event)"
         @reload-from-reference="emit('reloadFromReference')"
+        @reset-template="emit('resetTemplate')"
       />
     </div>
   </div>
@@ -127,5 +142,13 @@ function toggleOpen() {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-input);
+}
+.source-label {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
 }
 </style>

@@ -1,7 +1,9 @@
 import ExifReader from "exifreader";
 import type { ReferenceImageFormat } from "./imageFormat";
-import type { NativeMetadataBundle } from "./types";
-import { ALL_EDITABLE_EXIF_KEYS, ALL_EDITABLE_IPTC_KEYS } from "./fields";
+import type { NativeMetadataBundle, XmpMetadataBundle } from "./types";
+import { ALL_EDITABLE_EXIF_KEYS, ALL_EDITABLE_IPTC_KEYS, emptyXmpBundle } from "./fields";
+import { extractRawXmpPackets } from "./xmp";
+import { parseMotionPhotoXmpFromText } from "@shared/motionPhotoXmp";
 
 const MOTION_XMP_MARKERS = [
   "MotionPhoto",
@@ -20,6 +22,7 @@ const EXIF_ALIASES: Record<string, string[]> = {
   DateTimeOriginal: ["DateTimeOriginal", "Date Time Original", "Date/Time Original"],
   CreateDate: ["CreateDate", "Create Date"],
   ModifyDate: ["ModifyDate", "Modify Date"],
+  OffsetTimeOriginal: ["OffsetTimeOriginal", "Offset Time Original"],
   ExposureTime: ["ExposureTime", "Exposure Time"],
   FNumber: ["FNumber", "F Number", "ApertureValue"],
   ISOSpeedRatings: ["ISOSpeedRatings", "ISO Speed Ratings", "ISO", "PhotographicSensitivity"],
@@ -37,6 +40,11 @@ const EXIF_ALIASES: Record<string, string[]> = {
   Artist: ["Artist"],
   Copyright: ["Copyright"],
   UserComment: ["UserComment", "User Comment"],
+  InteropIndex: ["InteropIndex", "Interop Index"],
+  InteropVersion: ["InteropVersion", "Interop Version"],
+  YCbCrPositioning: ["YCbCrPositioning", "YCbCr Positioning"],
+  ExifImageWidth: ["ExifImageWidth", "Exif Image Width"],
+  ExifImageHeight: ["ExifImageHeight", "Exif Image Height"],
 };
 
 export interface ParseSummary {
@@ -51,7 +59,7 @@ export interface ParseSummary {
 
 type TagMap = Record<string, { description?: string; value?: unknown }>;
 
-function readPresentationTimestampUs(tags: TagMap): number | undefined {
+function readPresentationTimestampUs(tags: TagMap, xmpParsed?: ReturnType<typeof parseMotionPhotoXmpFromText>): number | undefined {
   const candidates = [
     tags["MotionPhotoPresentationTimestampUs"],
     tags["MicroVideoPresentationTimestampUs"],
@@ -64,6 +72,7 @@ function readPresentationTimestampUs(tags: TagMap): number | undefined {
       if (!Number.isNaN(n) && n >= 0) return Math.round(n);
     }
   }
+  if (xmpParsed?.presentationTimestampUs != null) return xmpParsed.presentationTimestampUs;
   return undefined;
 }
 
@@ -97,7 +106,6 @@ function isTagGroup(value: unknown): value is Record<string, unknown> {
   return Object.values(value).some(isTagObject);
 }
 
-/** Flatten exifreader expanded groups (exif, gps, composite, quicktime, …) into one map. */
 export function flattenExifReaderTags(raw: Record<string, unknown>): TagMap {
   const out: TagMap = {};
   for (const [key, value] of Object.entries(raw)) {
@@ -113,12 +121,83 @@ export function flattenExifReaderTags(raw: Record<string, unknown>): TagMap {
   return out;
 }
 
-/** True when the bundle contains user-visible editable fields. */
-export function bundleHasEditableFields(bundle: NativeMetadataBundle): boolean {
-  return Object.keys(bundle.exif).length + Object.keys(bundle.iptc).length > 0;
+/** Try decode OPPO MakerNote bytes as JSON for read-only UI display. */
+export function parseMakerNoteJson(tags: TagMap): string | undefined {
+  const raw = tags.MakerNote ?? tags["Maker Notes"];
+  if (!raw) return undefined;
+  const bytes =
+    raw.value instanceof ArrayBuffer
+      ? new Uint8Array(raw.value)
+      : raw.value instanceof Uint8Array
+        ? raw.value
+        : null;
+  if (!bytes || bytes.length === 0) return undefined;
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  const jsonStart = text.indexOf("{");
+  if (jsonStart < 0) return text.slice(0, 512);
+  const jsonSlice = text.slice(jsonStart);
+  try {
+    const parsed = JSON.parse(jsonSlice);
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return jsonSlice.slice(0, 512);
+  }
 }
 
-function parseFromTags(tags: TagMap): NativeMetadataBundle {
+function parseXmpFromBytes(bytes: Uint8Array): XmpMetadataBundle {
+  const xmp = emptyXmpBundle();
+  const packets = extractRawXmpPackets(bytes);
+  for (const packet of packets) {
+    if (!MOTION_XMP_MARKERS.some((m) => packet.includes(m))) continue;
+    const parsed = parseMotionPhotoXmpFromText(packet);
+    xmp.mode = parsed.mode ?? "native";
+    if (parsed.motionPhotoOwner) xmp.opcamera.MotionPhotoOwner = parsed.motionPhotoOwner;
+    if (parsed.oLivePhotoVersion != null) {
+      xmp.opcamera.OLivePhotoVersion = String(parsed.oLivePhotoVersion);
+    }
+    if (parsed.motionPhotoFeatureFlag != null) {
+      xmp.opcamera.MotionPhotoFeatureFlag = String(parsed.motionPhotoFeatureFlag);
+    }
+    if (parsed.videoLength != null) {
+      xmp.opcamera.VideoLength = String(parsed.videoLength);
+      xmp.container.videoLength = String(parsed.videoLength);
+    }
+    if (parsed.presentationTimestampUs != null) {
+      const ts = String(parsed.presentationTimestampUs);
+      xmp.gcamera.MotionPhotoPresentationTimestampUs = ts;
+      xmp.opcamera.MotionPhotoPrimaryPresentationTimestampUs = ts;
+    }
+    if (parsed.gainMapLength != null && parsed.gainMapLength > 0) {
+      xmp.container.gainMapLength = String(parsed.gainMapLength);
+    }
+    if (parsed.hdrgmVersion) xmp.hdrgm.version = parsed.hdrgmVersion;
+
+    xmp.gcamera.MotionPhoto = packet.includes('GCamera:MotionPhoto="1"') ? "1" : xmp.gcamera.MotionPhoto;
+    xmp.gcamera.MotionPhotoVersion = packet.match(/GCamera:MotionPhotoVersion="(\d+)"/)?.[1] ?? xmp.gcamera.MotionPhotoVersion;
+    if (parsed.mode === "compat" || packet.includes("GCamera:MicroVideo")) {
+      xmp.mode = "compat";
+      xmp.gcamera.MicroVideo = "1";
+      xmp.gcamera.MicroVideoVersion = "1";
+      if (parsed.videoLength != null) {
+        xmp.gcamera.MicroVideoOffset = String(parsed.videoLength);
+      }
+    }
+    break;
+  }
+  return xmp;
+}
+
+export function bundleHasEditableFields(bundle: NativeMetadataBundle): boolean {
+  const xmpFilled =
+    bundle.xmp &&
+    (Object.keys(bundle.xmp.gcamera).length > 0 ||
+      Object.keys(bundle.xmp.opcamera).length > 0 ||
+      Object.keys(bundle.xmp.container).length > 0 ||
+      Object.keys(bundle.xmp.hdrgm).length > 0);
+  return Object.keys(bundle.exif).length + Object.keys(bundle.iptc).length + (xmpFilled ? 1 : 0) > 0;
+}
+
+function parseFromTags(tags: TagMap, bytes?: Uint8Array): NativeMetadataBundle {
   const exif: Record<string, string> = {};
 
   for (const key of ALL_EDITABLE_EXIF_KEYS) {
@@ -148,7 +227,6 @@ function parseFromTags(tags: TagMap): NativeMetadataBundle {
     }
   }
 
-  // Composite GPS (common in HEIC / phone exports).
   if (!exif.GPSLatitude) {
     const lat = pickTag(tags, ["GPSLatitude", "Composite:GPSLatitude"]);
     if (lat) exif.GPSLatitude = lat;
@@ -162,26 +240,26 @@ function parseFromTags(tags: TagMap): NativeMetadataBundle {
     if (alt) exif.GPSAltitude = alt;
   }
 
+  const xmpParsed = bytes ? parseXmpFromBytes(bytes) : emptyXmpBundle();
+  const xmpFromText = bytes
+    ? parseMotionPhotoXmpFromText(extractRawXmpPackets(bytes).join("\n"))
+    : undefined;
+
   return {
     exif,
     iptc,
-    presentationTimestampUs: readPresentationTimestampUs(tags),
+    xmp: xmpParsed,
+    makerNoteJson: parseMakerNoteJson(tags),
+    presentationTimestampUs: readPresentationTimestampUs(tags, xmpFromText),
   };
 }
 
-/** Parse all readable string tags (full copy mode for non-JPEG sources). */
 export function parseFullMetadataBundle(bytes: Uint8Array): NativeMetadataBundle {
   const tags = flattenExifReaderTags(loadRawTags(bytes));
-  const base = parseFromTags(tags);
+  const base = parseFromTags(tags, bytes);
   const exif = { ...base.exif };
 
-  const skipNames = new Set([
-    "Thumbnail",
-    "Images",
-    "MakerNote",
-    "UserComment",
-    "PrintIM",
-  ]);
+  const skipNames = new Set(["Thumbnail", "Images", "MakerNote", "UserComment", "PrintIM"]);
 
   for (const [name, tag] of Object.entries(tags)) {
     if (skipNames.has(name)) continue;
@@ -197,12 +275,10 @@ export function parseFullMetadataBundle(bytes: Uint8Array): NativeMetadataBundle
   return { ...base, exif };
 }
 
-/** Parse image bytes (JPEG / HEIC / PNG / WebP) into an editable metadata bundle. */
 export function parseFromTagMap(bytes: Uint8Array): NativeMetadataBundle {
   return parseFullMetadataBundle(bytes);
 }
 
-/** Parse reference image into an editable metadata bundle. */
 export async function parseReferenceImage(bytes: Uint8Array): Promise<NativeMetadataBundle> {
   return parseFromTagMap(bytes);
 }

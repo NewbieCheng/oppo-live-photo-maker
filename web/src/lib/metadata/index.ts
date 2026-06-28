@@ -2,11 +2,11 @@ export type { CoverMode, NativeMetadataBundle, PresentationOptions } from "./typ
 export { computePresentationTimestampUs } from "./presentation";
 export {
   METADATA_FIELD_GROUPS,
-  OPPO_SYSTEM_FIELDS,
   emptyBundle,
   mergeBundles,
+  type MetadataFieldDef,
 } from "./fields";
-export { parseReferenceImage, parseReferenceImageSync, parseFromTagMap, flattenExifReaderTags, bundleHasEditableFields } from "./parse";
+export { parseReferenceImage, parseReferenceImageSync, parseFromTagMap, flattenExifReaderTags, bundleHasEditableFields, parseMakerNoteJson } from "./parse";
 export type { ParseSummary } from "./parse";
 export {
   detectReferenceFormat,
@@ -37,3 +37,24 @@ export {
 } from "./copyContract";
 export { previewBlobForImageFile, rasterImageToJpegBytes } from "./imageToJpeg";
 export { extractRawXmpPackets, buildXmpApp1Segment } from "./xmp";
+export {
+  buildOppoMotionPhotoWithNative,
+  buildLivePhotoFromReference,
+  buildLivePhotoWithMetadata,
+  mergeReferenceEdits,
+  muxOptionsFromBundle,
+} from "./nativeMux";
+export {
+  createFindX8UltraTemplate,
+  FIND_X8_ULTRA_TEMPLATE_LABEL,
+  metadataSourceLabel,
+  type MetadataSourceMode,
+} from "./metadataTemplate";
+export {
+  applySpoofAfterMotionPhotoMux,
+  applyExifSpoofKeepingMotionXmp,
+  computeSpoofDirtyKeys,
+  FEATURE_ONE_SPOOF_GROUP_IDS,
+  mergeSpoofBundles,
+  spoofBundleFrom,
+} from "./spoofMetadata";

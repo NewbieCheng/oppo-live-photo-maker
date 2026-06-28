@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { applyNativeMetadata, buildSyntheticReferenceJpeg, ensureIfd0MakeModel, OPPO_USER_COMMENT } from "./apply";
-import { buildOppoMotionPhotoWithNative } from "./nativeMux";
+import { applyNativeMetadata, buildExifApp1PayloadFromBundle, buildSyntheticReferenceJpeg, ensureIfd0MakeModel, OPPO_USER_COMMENT } from "./apply";
+import { buildOppoMotionPhotoWithNative, buildLivePhotoWithMetadata, muxOptionsFromBundle } from "./nativeMux";
+import { createFindX8UltraTemplate } from "./metadataTemplate";
+import { emptyXmpBundle } from "./fields";
 import { extractTransplantableSegments } from "./segments";
 
 function seg(marker: number, payload: Uint8Array): Uint8Array {
@@ -97,6 +99,25 @@ describe("applyNativeMetadata", () => {
   });
 });
 
+describe("muxOptionsFromBundle", () => {
+  it("maps XMP mode, UserComment, and presentation timestamp", () => {
+    const opts = muxOptionsFromBundle(
+      {
+        exif: { UserComment: "Oplus_8388608" },
+        iptc: {},
+        xmp: { ...emptyXmpBundle(), mode: "compat" },
+        presentationTimestampUs: 1_234_567,
+      },
+      2,
+      0.5,
+      "videoFrame",
+    );
+    expect(opts.xmpMode).toBe("compat");
+    expect(opts.userComment).toBe("Oplus_8388608");
+    expect(opts.presentationTimestampUs).toBe(1_234_567);
+  });
+});
+
 describe("buildOppoMotionPhoto with native metadata", () => {
   it("still produces valid motion photo with metadata bundle", () => {
     const cover = tinyJpeg();
@@ -110,6 +131,46 @@ describe("buildOppoMotionPhoto with native metadata", () => {
     const text = new TextDecoder("latin1").decode(out);
     expect(text).toContain("Oplus_8388608");
     expect(text).toContain("500000");
+  });
+});
+
+describe("createFindX8UltraTemplate", () => {
+  it("builds piexif-compatible EXIF payload", () => {
+    const template = createFindX8UltraTemplate();
+    const payload = buildExifApp1PayloadFromBundle(template, false);
+    expect(payload).not.toBeNull();
+    const text = new TextDecoder("latin1").decode(payload!);
+    expect(text).toContain("OPPO Find X8 Ultra");
+  });
+});
+
+describe("buildLivePhotoWithMetadata", () => {
+  it("muxes MotionPhoto XMP first then spoofs template EXIF", () => {
+    const cover = tinyJpeg();
+    const mp4 = new Uint8Array(16);
+    const template = createFindX8UltraTemplate();
+    const out = buildLivePhotoWithMetadata(cover, mp4, {
+      metadata: template,
+      coverTime: 0,
+      segmentStart: 0,
+      useReferenceSegments: false,
+    });
+    const text = new TextDecoder("latin1").decode(out);
+    expect(text).toContain("OPPO Find X8 Ultra");
+    expect(text).toContain("MotionPhotoOwner");
+    expect(text).toContain("oplus");
+    expect(text).toContain("VideoLength=\"16\"");
+  });
+
+  it("default path unchanged without spoof metadata", () => {
+    const cover = tinyJpeg();
+    const mp4 = new Uint8Array(16);
+    const out = buildLivePhotoWithMetadata(cover, mp4, {
+      coverTime: 1,
+      segmentStart: 0.5,
+    });
+    expect(out[0]).toBe(0xff);
+    expect(out[1]).toBe(0xd8);
   });
 });
 

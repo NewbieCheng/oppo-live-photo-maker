@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "dev:local": "powershell -ExecutionPolicy Bypass -File ../scripts/start-backend.ps1",
     "start": "node dist/server.js",
     "build": "tsc",
     "test": "vitest run"

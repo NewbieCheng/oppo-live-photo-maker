@@ -36,7 +36,12 @@ export function buildTagsFromFileArgs(options: CopyMetadataOptions = {}): string
   return args;
 }
 
+/** Safe filename for ExifTool WASM VFS (spaces/parens break FilenameSPrintf → EFile errors). */
 export function vfsBasename(name: string): string {
   const base = name.replace(/^.*[/\\]/, "").trim();
-  return base || "image.jpg";
+  const safe = base
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "");
+  return safe || "image.jpg";
 }

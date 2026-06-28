@@ -16,9 +16,10 @@ describe("postCopyPipeline MotionPhoto XMP rebuild", () => {
     const result = postCopyPipeline(jpeg, "", trailing, { excludeXmp: true, excludeExif: true }, "test");
 
     const text = new TextDecoder("latin1").decode(result.jpeg);
-    expect(text).toContain('GCamera:MicroVideoOffset="8"');
+    expect(text).toContain('GCamera:MotionPhoto="1"');
     expect(text).toContain('OpCamera:VideoLength="8"');
     expect(text).toContain("<Item:Length>8</Item:Length>");
+    expect(text).not.toContain("MicroVideo");
   });
 
   it("rebuilds MotionPhoto XMP when excludeXmp is false (full copy preset)", () => {

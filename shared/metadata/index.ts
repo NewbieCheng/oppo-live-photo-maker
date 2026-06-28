@@ -6,4 +6,6 @@ export * from "./segments.js";
 export * from "./segmentCopySync.js";
 export * from "./minimalJpeg.js";
 export * from "./colorOsValidate.js";
+export * from "./colorOsExifPatch.js";
+export * from "./jpegDimensions.js";
 export * from "./motionPhotoXmp.js";

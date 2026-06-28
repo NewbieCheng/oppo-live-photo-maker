@@ -37,7 +37,7 @@ function fromDataUrl(dataUrl: string): Uint8Array {
 
 type ExifDict = Record<string, Record<number, string | number | [number, number]>>;
 
-/** Minimal valid JPEG used as ExifTool metadata canvas (HEIC → segment materialize). */
+/** Minimal JPEG canvas for piexif / segment materialize (no SOF scan data required). */
 export function minimalJpeg(): Uint8Array {
   function seg(marker: number, payload: Uint8Array): Uint8Array {
     const out = new Uint8Array(2 + 2 + payload.length);
@@ -60,7 +60,7 @@ function binaryStringToUint8(binary: string): Uint8Array {
   return out;
 }
 
-function wrapApp1Segment(exifPayload: Uint8Array): Uint8Array {
+export function wrapApp1Segment(exifPayload: Uint8Array): Uint8Array {
   const segLen = exifPayload.length + 2;
   const out = new Uint8Array(4 + exifPayload.length);
   out[0] = 0xff;
@@ -109,7 +109,7 @@ function parseRational(value: string): [number, number] | string {
   return value;
 }
 
-function applyExifOverrides(
+export function applyExifOverrides(
   exifObj: ExifDict,
   bundle: NativeMetadataBundle,
   injectOppoMarker = true,
@@ -130,13 +130,21 @@ function applyExifOverrides(
     Flash: ["Exif", piexif.ExifIFD.Flash as number],
     WhiteBalance: ["Exif", piexif.ExifIFD.WhiteBalance as number],
     LensModel: ["Exif", piexif.ExifIFD.LensModel as number],
+    MeteringMode: ["Exif", piexif.ExifIFD.MeteringMode as number],
     GPSLatitude: ["GPS", piexif.GPSIFD.GPSLatitude as number],
     GPSLongitude: ["GPS", piexif.GPSIFD.GPSLongitude as number],
     GPSAltitude: ["GPS", piexif.GPSIFD.GPSAltitude as number],
     GPSDateStamp: ["GPS", piexif.GPSIFD.GPSDateStamp as number],
   };
 
-  const intTags = new Set(["Orientation", "Flash", "WhiteBalance", "ISOSpeedRatings", "ISO"]);
+  const intTags = new Set([
+    "Orientation",
+    "Flash",
+    "WhiteBalance",
+    "ISOSpeedRatings",
+    "ISO",
+    "MeteringMode",
+  ]);
   const rationalTags = new Set(["ExposureTime", "FNumber", "FocalLength"]);
 
   for (const [key, value] of Object.entries(bundle.exif)) {
@@ -160,10 +168,18 @@ function applyExifOverrides(
     if (map[key]) continue;
     if (imageIfd[key] !== undefined) {
       if (!exifObj["0th"]) exifObj["0th"] = {};
-      exifObj["0th"][imageIfd[key]] = value;
+      exifObj["0th"][imageIfd[key]] = intTags.has(key)
+        ? parseInt(value, 10) || value
+        : rationalTags.has(key)
+          ? parseRational(value)
+          : value;
     } else if (exifIfd[key] !== undefined) {
       if (!exifObj.Exif) exifObj.Exif = {};
-      exifObj.Exif[exifIfd[key]] = value;
+      exifObj.Exif[exifIfd[key]] = intTags.has(key)
+        ? parseInt(value, 10) || value
+        : rationalTags.has(key)
+          ? parseRational(value)
+          : value;
     } else if (gpsIfd[key] !== undefined) {
       if (!exifObj.GPS) exifObj.GPS = {};
       exifObj.GPS[gpsIfd[key]] = value;
@@ -171,7 +187,9 @@ function applyExifOverrides(
   }
 
   if (!exifObj.Exif) exifObj.Exif = {};
-  if (injectOppoMarker) {
+  if (bundle.exif.UserComment) {
+    exifObj.Exif[piexif.ExifIFD.UserComment as number] = bundle.exif.UserComment;
+  } else if (injectOppoMarker) {
     exifObj.Exif[piexif.ExifIFD.UserComment as number] = OPPO_USER_COMMENT;
   }
 }
@@ -307,8 +325,11 @@ export function ensureIfd0MakeModel(
  * Build a minimal JPEG whose EXIF APP1 carries parsed field values.
  * Used for HEIC/PNG/WebP references where segment copy from source is impossible.
  */
-export function buildSyntheticReferenceJpeg(bundle: NativeMetadataBundle): Uint8Array {
-  const payload = buildExifApp1PayloadFromBundle(bundle);
+export function buildSyntheticReferenceJpeg(
+  bundle: NativeMetadataBundle,
+  injectOppoMarker = true,
+): Uint8Array {
+  const payload = buildExifApp1PayloadFromBundle(bundle, injectOppoMarker);
   if (!payload) return minimalJpeg();
   return insertAfterAppSegments(minimalJpeg(), [wrapApp1Segment(payload)]);
 }

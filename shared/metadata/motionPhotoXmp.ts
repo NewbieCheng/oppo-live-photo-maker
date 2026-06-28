@@ -1,9 +1,28 @@
 /**
- * MotionPhoto XMP rebuild (GCamera MicroVideo, no APP2 MPF) — shared by backend.
+ * MotionPhoto XMP rebuild — canonical builder (native + compat modes).
  */
 import { scanJpegSegments, stripXmpAndMpf } from "./segments.js";
 
 const enc = new TextEncoder();
+
+export type MotionPhotoXmpMode = "native" | "compat";
+
+export interface MotionPhotoXmpOptions {
+  videoLength: number;
+  presentationTimestampUs?: number;
+  mode?: MotionPhotoXmpMode;
+  gainMapLength?: number;
+  hdrgmVersion?: string;
+  motionPhotoOwner?: string;
+  oLivePhotoVersion?: number;
+  motionPhotoFeatureFlag?: number;
+}
+
+/** @deprecated Use MotionPhotoXmpOptions */
+export interface XmpFields {
+  videoLength: number;
+  presentationTimestampUs?: number;
+}
 
 function concat(...parts: Uint8Array[]): Uint8Array {
   const total = parts.reduce((n, p) => n + p.length, 0);
@@ -51,54 +70,74 @@ function findInsertionPoint(jpeg: Uint8Array): number {
   return lastAppEnd;
 }
 
-interface XmpFields {
-  videoLength: number;
-  presentationTimestampUs?: number;
+function containerItem(mime: string, semantic: string, length: number): string {
+  return (
+    `     <rdf:li rdf:parseType="Resource">\n` +
+    `      <Container:Item rdf:parseType="Resource">\n` +
+    `       <Item:Mime>${mime}</Item:Mime>\n` +
+    `       <Item:Semantic>${semantic}</Item:Semantic>\n` +
+    `       <Item:Length>${length}</Item:Length>\n` +
+    `       <Item:Padding>0</Item:Padding>\n` +
+    `      </Container:Item>\n` +
+    `     </rdf:li>\n`
+  );
 }
 
-function buildXmpPacket(fields: XmpFields): string {
-  const len = fields.videoLength;
-  const ts = fields.presentationTimestampUs ?? 0;
-  const tsMicro = Math.floor(ts / 1000);
+/** Build MotionPhoto XMP packet XML (native or compat). */
+export function buildMotionPhotoXmpPacket(options: MotionPhotoXmpOptions): string {
+  const len = Math.max(0, options.videoLength);
+  const ts = Math.max(0, options.presentationTimestampUs ?? 0);
+  const mode = options.mode ?? "native";
+  const owner = options.motionPhotoOwner ?? "oplus";
+  const oLiveVer = options.oLivePhotoVersion ?? 2;
+  const featureFlag = options.motionPhotoFeatureFlag ?? 1;
+  const gainMapLen = Math.max(0, options.gainMapLength ?? 0);
+  const hdrgmVersion = options.hdrgmVersion;
+
+  const hdrgmNs = hdrgmVersion
+    ? `    xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/"\n`
+    : "";
+  const hdrgmAttr = hdrgmVersion ? `    hdrgm:Version="${hdrgmVersion}"\n` : "";
+
+  const microVideoAttrs =
+    mode === "compat"
+      ? (
+          `    GCamera:MicroVideoVersion="1"\n` +
+          `    GCamera:MicroVideo="1"\n` +
+          `    GCamera:MicroVideoOffset="${len}"\n` +
+          `    GCamera:MicroVideoPresentationTimestampUs="${ts}"\n`
+        )
+      : "";
+
+  let containerItems = containerItem("image/jpeg", "Primary", 0);
+  if (gainMapLen > 0) {
+    containerItems += containerItem("image/jpeg", "GainMap", gainMapLen);
+  }
+  containerItems += containerItem("video/mp4", "MotionPhoto", len);
+
   return (
     `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>\n` +
     `<x:xmpmeta xmlns:x="adobe:ns:meta/">\n` +
     ` <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n` +
     `  <rdf:Description rdf:about=""\n` +
+    hdrgmNs +
     `    xmlns:GCamera="http://ns.google.com/photos/1.0/camera/"\n` +
     `    xmlns:OpCamera="http://ns.oplus.com/photos/1.0/camera/"\n` +
     `    xmlns:Container="http://ns.google.com/photos/1.0/container/"\n` +
     `    xmlns:Item="http://ns.google.com/photos/1.0/container/item/"\n` +
+    hdrgmAttr +
     `    GCamera:MotionPhoto="1"\n` +
     `    GCamera:MotionPhotoVersion="1"\n` +
-    `    GCamera:MotionPhotoPresentationTimestampUs="${tsMicro}"\n` +
-    `    GCamera:MicroVideoVersion="1"\n` +
-    `    GCamera:MicroVideo="1"\n` +
-    `    GCamera:MicroVideoOffset="${len}"\n` +
-    `    GCamera:MicroVideoPresentationTimestampUs="${tsMicro}"\n` +
+    `    GCamera:MotionPhotoPresentationTimestampUs="${ts}"\n` +
+    microVideoAttrs +
     `    OpCamera:MotionPhotoPrimaryPresentationTimestampUs="${ts}"\n` +
-    `    OpCamera:MotionPhotoOwner="oplus"\n` +
-    `    OpCamera:OLivePhotoVersion="2"\n` +
+    `    OpCamera:MotionPhotoOwner="${owner}"\n` +
+    `    OpCamera:OLivePhotoVersion="${oLiveVer}"\n` +
     `    OpCamera:VideoLength="${len}"\n` +
-    `    OpCamera:MotionPhotoFeatureFlag="1">\n` +
+    `    OpCamera:MotionPhotoFeatureFlag="${featureFlag}">\n` +
     `   <Container:Directory>\n` +
     `    <rdf:Seq>\n` +
-    `     <rdf:li rdf:parseType="Resource">\n` +
-    `      <Container:Item rdf:parseType="Resource">\n` +
-    `       <Item:Mime>image/jpeg</Item:Mime>\n` +
-    `       <Item:Semantic>Primary</Item:Semantic>\n` +
-    `       <Item:Length>0</Item:Length>\n` +
-    `       <Item:Padding>0</Item:Padding>\n` +
-    `      </Container:Item>\n` +
-    `     </rdf:li>\n` +
-    `     <rdf:li rdf:parseType="Resource">\n` +
-    `      <Container:Item rdf:parseType="Resource">\n` +
-    `       <Item:Mime>video/mp4</Item:Mime>\n` +
-    `       <Item:Semantic>MotionPhoto</Item:Semantic>\n` +
-    `       <Item:Length>${len}</Item:Length>\n` +
-    `       <Item:Padding>0</Item:Padding>\n` +
-    `      </Container:Item>\n` +
-    `     </rdf:li>\n` +
+    containerItems +
     `    </rdf:Seq>\n` +
     `   </Container:Directory>\n` +
     `  </rdf:Description>\n` +
@@ -110,8 +149,9 @@ function buildXmpPacket(fields: XmpFields): string {
 
 const XMP_NS_URI = "http://ns.adobe.com/xap/1.0/\0";
 
-function buildXmpApp1(fields: XmpFields): Uint8Array {
-  const xmpBytes = enc.encode(buildXmpPacket(fields));
+/** Build APP1 segment carrying MotionPhoto XMP. */
+export function buildMotionPhotoXmpApp1(options: MotionPhotoXmpOptions): Uint8Array {
+  const xmpBytes = enc.encode(buildMotionPhotoXmpPacket(options));
   const headerBytes = enc.encode(XMP_NS_URI);
   const body = concat(headerBytes, xmpBytes);
   if (body.length > 65533) {
@@ -121,19 +161,95 @@ function buildXmpApp1(fields: XmpFields): Uint8Array {
   return concat(new Uint8Array([0xff, 0xe1]), writeU16BE(segLen), body);
 }
 
+/** @deprecated Use buildMotionPhotoXmpApp1 */
+function buildXmpApp1(fields: XmpFields): Uint8Array {
+  return buildMotionPhotoXmpApp1({
+    videoLength: fields.videoLength,
+    presentationTimestampUs: fields.presentationTimestampUs,
+    mode: "compat",
+  });
+}
+
+/** Parse MotionPhoto-related values from existing XMP text (best-effort). */
+export function parseMotionPhotoXmpFromText(xmpText: string): Partial<MotionPhotoXmpOptions> {
+  const pick = (pattern: RegExp): string | undefined => {
+    const m = xmpText.match(pattern);
+    return m?.[1];
+  };
+  const pickNum = (pattern: RegExp): number | undefined => {
+    const v = pick(pattern);
+    if (v == null || v === "") return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
+  const videoLength = pickNum(/OpCamera:VideoLength="(\d+)"/);
+  const ts =
+    pickNum(/GCamera:MotionPhotoPresentationTimestampUs="(\d+)"/) ??
+    pickNum(/OpCamera:MotionPhotoPrimaryPresentationTimestampUs="(\d+)"/);
+  const gainMapMatch = xmpText.match(
+    /Item:Semantic>GainMap<\/Item:Semantic>[\s\S]*?Item:Length>(\d+)</,
+  );
+  const gainMapLength = gainMapMatch ? Number(gainMapMatch[1]) : undefined;
+  const hdrgmVersion = pick(/hdrgm:Version="([^"]+)"/);
+  const motionPhotoOwner = pick(/OpCamera:MotionPhotoOwner="([^"]+)"/);
+  const hasMicroVideo = /GCamera:MicroVideo="1"/.test(xmpText);
+
+  return {
+    videoLength,
+    presentationTimestampUs: ts,
+    gainMapLength: Number.isFinite(gainMapLength) ? gainMapLength : undefined,
+    hdrgmVersion,
+    motionPhotoOwner,
+    mode: hasMicroVideo ? "compat" : "native",
+    oLivePhotoVersion: pickNum(/OpCamera:OLivePhotoVersion="(\d+)"/),
+    motionPhotoFeatureFlag: pickNum(/OpCamera:MotionPhotoFeatureFlag="(\d+)"/),
+  };
+}
+
 export function rebuildMotionPhotoXmpInJpeg(
   jpeg: Uint8Array,
   videoLength: number,
-  options: { presentationTimestampUs?: number } = {},
+  options: Omit<MotionPhotoXmpOptions, "videoLength"> = {},
 ): Uint8Array {
   const baseJpeg = stripXmpAndMpf(jpeg);
-  const xmp = buildXmpApp1({
+
+  let merged: MotionPhotoXmpOptions = {
     videoLength,
-    presentationTimestampUs: options.presentationTimestampUs ?? 0,
-  });
+    mode: options.mode ?? "native",
+    ...options,
+  };
+
+  for (const seg of scanJpegSegments(jpeg)) {
+    if (seg.marker !== 0xe1) continue;
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(seg.payload);
+    if (!text.includes("GCamera:MotionPhoto") && !text.includes("OpCamera:")) continue;
+    const parsed = parseMotionPhotoXmpFromText(text);
+    merged = {
+      mode: options.mode ?? parsed.mode ?? "native",
+      presentationTimestampUs:
+        options.presentationTimestampUs ?? parsed.presentationTimestampUs ?? 0,
+      gainMapLength: options.gainMapLength ?? parsed.gainMapLength,
+      hdrgmVersion: options.hdrgmVersion ?? parsed.hdrgmVersion,
+      motionPhotoOwner: options.motionPhotoOwner ?? parsed.motionPhotoOwner ?? "oplus",
+      oLivePhotoVersion: options.oLivePhotoVersion ?? parsed.oLivePhotoVersion ?? 2,
+      motionPhotoFeatureFlag: options.motionPhotoFeatureFlag ?? parsed.motionPhotoFeatureFlag ?? 1,
+      videoLength,
+    };
+    break;
+  }
+
+  const xmp = buildMotionPhotoXmpApp1(merged);
   const insAfterSoi = findInsertionPoint(baseJpeg);
   return concat(baseJpeg.subarray(0, insAfterSoi), xmp, baseJpeg.subarray(insAfterSoi));
 }
 
 /** @internal for tests */
-export const _internal = { findInsertionPoint, buildXmpApp1, scanJpegSegments };
+export const _internal = {
+  findInsertionPoint,
+  buildXmpApp1,
+  buildMotionPhotoXmpPacket,
+  buildMotionPhotoXmpApp1,
+  scanJpegSegments,
+  parseMotionPhotoXmpFromText,
+};

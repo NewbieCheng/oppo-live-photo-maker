@@ -7,6 +7,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import { copyImgMeta } from "./copyImgMeta.js";
+import { editMetadataBytes } from "./editMetadata.js";
 import { getTagStats } from "./exiftoolCli.js";
 import { getBackendHealth, VERSION } from "./health.js";
 import { warmupExiv2 } from "./exiv2Module.js";
@@ -22,6 +23,14 @@ function safeFilename(name: string | undefined, fallback: string): string {
   return base.replace(/[^\w.\- ()[\]]+/g, "_") || fallback;
 }
 
+/** HTTP response headers must be ASCII (Node rejects CJK / control chars). */
+function safeHeaderValue(value: string | undefined | null): string {
+  if (!value) return "";
+  const normalized = value.replace(/[\r\n]+/g, " ");
+  if (/^[\t\x20-\x7E]*$/.test(normalized)) return normalized.slice(0, 1024);
+  return encodeURIComponent(normalized).slice(0, 1024);
+}
+
 function outputMetaName(destName: string): string {
   const ext = path.extname(destName) || ".jpg";
   const stem = path.basename(destName, ext) || "output";
@@ -31,6 +40,34 @@ function outputMetaName(destName: string): string {
 function parseBoolField(value: unknown): boolean {
   if (value === true || value === "true" || value === "1") return true;
   return false;
+}
+
+function outputEditedName(name: string): string {
+  const ext = path.extname(name) || ".jpg";
+  const stem = path.basename(name, ext) || "output";
+  return `${stem}-edited${ext}`;
+}
+
+function parseEditsJson(raw: unknown): {
+  exif: Record<string, string>;
+  iptc: Record<string, string>;
+  presentationTimestampUs?: number;
+} | null {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw) as {
+      exif?: Record<string, string>;
+      iptc?: Record<string, string>;
+      presentationTimestampUs?: number;
+    };
+    return {
+      exif: parsed.exif ?? {},
+      iptc: parsed.iptc ?? {},
+      presentationTimestampUs: parsed.presentationTimestampUs,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function muxViaPython(coverPath: string, videoPath: string, outputPath: string): void {
@@ -119,6 +156,7 @@ export async function buildServer() {
         new Uint8Array(source.buffer),
         new Uint8Array(dest.buffer),
         source.filename,
+        dest.filename,
         { excludeExif, excludeXmp, excludeIptc },
       );
     } catch (e) {
@@ -131,20 +169,82 @@ export async function buildServer() {
 
     reply
       .header("Content-Disposition", `attachment; filename="${outName}"`)
-      .header("X-Backend", healthBackend)
-      .header("X-Backend-Used", result.backendUsed)
-      .header("X-Source-Make", sourceStats.make)
-      .header("X-Source-Model", sourceStats.model)
-      .header("X-Output-Make", outputStats.make)
-      .header("X-Output-Model", outputStats.model)
+      .header("X-Backend", safeHeaderValue(healthBackend))
+      .header("X-Backend-Used", safeHeaderValue(result.backendUsed))
+      .header("X-Source-Make", safeHeaderValue(sourceStats.make))
+      .header("X-Source-Model", safeHeaderValue(sourceStats.model))
+      .header("X-Output-Make", safeHeaderValue(outputStats.make))
+      .header("X-Output-Model", safeHeaderValue(outputStats.model))
       .header("X-Output-Exif-Count", String(outputStats.exifCount))
       .header("X-Source-Field-Count", String(sourceStats.fieldCount));
 
     if (result.colorOsIssues.length > 0) {
-      reply.header("X-ColorOS-Warning", result.colorOsIssues.join("; "));
+      reply.header("X-ColorOS-Warning", safeHeaderValue(result.colorOsIssues.join("; ")));
     }
 
     return reply.type("image/jpeg").send(Buffer.from(result.bytes));
+  });
+
+  app.post("/api/edit-metadata", async (request, reply) => {
+    const health = await getBackendHealth();
+    if (!health.gexiv2.available) {
+      return reply.status(503).send({
+        detail: "Backend unavailable: exiv2-wasm failed to load and exiftool not found.",
+      });
+    }
+
+    const parts = request.parts();
+    let file: { buffer: Buffer; filename: string } | null = null;
+    let editsJson: string | undefined;
+
+    for await (const part of parts) {
+      if (part.type === "field" && part.fieldname === "edits") {
+        editsJson = String(part.value ?? "");
+      } else if (part.type === "file" && part.fieldname === "file") {
+        const chunks: Buffer[] = [];
+        if (part.file) {
+          for await (const chunk of part.file) chunks.push(chunk);
+        }
+        file = {
+          buffer: Buffer.concat(chunks),
+          filename: safeFilename(part.filename, "photo.jpg"),
+        };
+      }
+    }
+
+    if (!file) {
+      return reply.status(400).send({ detail: "Missing file upload" });
+    }
+
+    const edits = parseEditsJson(editsJson);
+    if (!edits) {
+      return reply.status(400).send({ detail: "Missing or invalid edits JSON" });
+    }
+
+    let result: ReturnType<typeof editMetadataBytes>;
+    try {
+      result = editMetadataBytes(new Uint8Array(file.buffer), file.filename, edits);
+    } catch (e) {
+      return reply.status(400).send({ detail: e instanceof Error ? e.message : String(e) });
+    }
+
+    const outName = outputEditedName(file.filename);
+    const outputStats = getTagStats(result.bytes);
+
+    reply
+      .header("Content-Disposition", `attachment; filename="${outName}"`)
+      .header("X-Backend", safeHeaderValue(health.gexiv2.backend))
+      .header("X-Backend-Used", "exiftool-edit")
+      .header("X-Output-Make", safeHeaderValue(outputStats.make))
+      .header("X-Output-Model", safeHeaderValue(outputStats.model))
+      .header("X-Output-Exif-Count", String(outputStats.exifCount))
+      .header("X-Source-Field-Count", String(result.fieldsWritten));
+
+    if (result.colorOsIssues.length > 0) {
+      reply.header("X-ColorOS-Warning", safeHeaderValue(result.colorOsIssues.join("; ")));
+    }
+
+    return reply.type("application/octet-stream").send(Buffer.from(result.bytes));
   });
 
   app.post("/api/mux-live-photo", async (request, reply) => {

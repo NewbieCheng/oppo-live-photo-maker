@@ -276,7 +276,7 @@ TagsFromFile 源 -All:all [--XMP:all] -o 输出 目标
 |--------|-----|------|
 | P0 | ExifTool 输出 **II 小端** | `-api ByteOrder=II` 或复制后转换 |
 | P0 | copy 后 **同步 VideoLength** | 向 live.jpg copy 后 rebuild MotionPhoto XMP（web / Python / backend 已统一） |
-| P1 | 补全 Interop / OffsetTime | 从源图复制或写入默认值 |
+| P1 | 补全 Interop / OffsetTime | copy 后 `supplementColorOsExif` 自动写入 InteropIndex/Version 与 ExifImage 尺寸 |
 | P2 | UI 引导「先 copy 封面再 mux」 | 减少 live.jpg 作目标 |
 | P2 | 一键流水线 | 功能二结果直接进功能一 |
 
@@ -325,6 +325,7 @@ def scan_jpeg(path: str) -> None:
 
 ## 附录 B：参考链接
 
+- [OPPO Find X8 元数据参考（参数百科与修改建议）](./oppo-find-x8-metadata-reference.md)
 - [live-photo-conv README-zh — Android 厂商分裂 FAQ](https://github.com/wszqkzqk/live-photo-conv/blob/main/README-zh.md)
 - [live-photo-conv copyimgmeta.vala](https://github.com/wszqkzqk/live-photo-conv/blob/main/src/copyimgmeta.vala)
 - 本仓库：`web/src/lib/metadata/copyContract.ts`、`exiftoolCopy.ts`、`muxer.ts`
@@ -337,4 +338,4 @@ def scan_jpeg(path: str) -> None:
 |------|------|
 | 2026-06-27 | 初版：output2 vs live-meta CLI 对比、推荐步骤、排查清单 |
 | 2026-06-27 | 修正：区分网页功能一（仅视频）与桌面「封面+视频」流程 |
-| 2026-06-27 | 语义纠正：排除 XMP ≠ OPPO 不要 XMP；明确 MotionPhoto XMP 由 mux/rebuild 保证；修正 README 流程顺序 |
+| 2026-06-28 | 新增 [oppo-find-x8-metadata-reference.md](./oppo-find-x8-metadata-reference.md) 链接 |

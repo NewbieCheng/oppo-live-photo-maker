@@ -397,7 +397,9 @@ async function runCopy() {
     status.value = "error";
     errorText.value = (e as Error).message ?? String(e);
     debugLog("D", "MetadataCopyView.vue:runCopy", "error", {
-      message: errorText.value.slice(0, 200),
+      message: errorText.value.slice(0, 800),
+      engine: copyEngine.value,
+      hasEFile: errorText.value.includes("EFile"),
     });
     statusText.value = "复制失败";
   }

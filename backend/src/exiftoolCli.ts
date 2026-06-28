@@ -3,6 +3,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  inferCopyExifByteOrder,
+  type ExifByteOrder,
+} from "@shared/exifByteOrder.js";
+import {
+  buildExiftoolSupplementArgs,
+  hasColorOsExifSupplement,
+  planColorOsExifSupplement,
+} from "@shared/colorOsExifPatch.js";
 import { buildTagsFromFileArgs, type CopyMetadataOptions } from "@shared/copyContract.js";
 import { minimalJpeg } from "@shared/minimalJpeg.js";
 
@@ -82,19 +91,50 @@ export function getTagStats(jpeg: Uint8Array): {
   return { make, model, exifCount, fieldCount };
 }
 
-export function syncFullExifFromSource(
+/** Fill Interop IFD + ExifImage size + byte order aligned with source (ColorOS watermark). */
+export function supplementColorOsExif(
   destJpeg: Uint8Array,
-  sourcePath: string,
+  tags?: Record<string, unknown>,
+  sourceTags?: Record<string, unknown>,
+  sourceJpeg?: Uint8Array,
 ): Uint8Array {
   const exiftool = findExiftool();
   if (!exiftool) return destJpeg;
+  const tagMap = tags ?? readTagsJson(destJpeg);
+  const plan = planColorOsExifSupplement(destJpeg, tagMap, sourceTags, sourceJpeg);
+  if (!hasColorOsExifSupplement(plan)) return destJpeg;
+  return withTempDir("oppo-supp-", (dir) => {
+    const dest = path.join(dir, "dest.jpg");
+    fs.writeFileSync(dest, destJpeg);
+    runExiftool([...buildExiftoolSupplementArgs(plan), "-overwrite_original", dest]);
+    return new Uint8Array(fs.readFileSync(dest));
+  });
+}
+
+function byteOrderApiFromSource(sourcePath: string): string[] {
+  const sourceBytes = new Uint8Array(fs.readFileSync(sourcePath));
+  const sourceTags = readTagsJson(sourceBytes);
+  const order = inferCopyExifByteOrder(sourceTags, sourceBytes);
+  return ["-api", `ByteOrder=${order}`];
+}
+
+export function syncFullExifFromSource(
+  destJpeg: Uint8Array,
+  sourcePath: string,
+  byteOrder?: ExifByteOrder,
+): Uint8Array {
+  const exiftool = findExiftool();
+  if (!exiftool) return destJpeg;
+  const orderApi =
+    byteOrder != null
+      ? ["-api", `ByteOrder=${byteOrder}`]
+      : byteOrderApiFromSource(sourcePath);
   return withTempDir("oppo-sync-", (dir) => {
     const dest = path.join(dir, "dest.jpg");
     const out = path.join(dir, "out.jpg");
     fs.writeFileSync(dest, destJpeg);
     runExiftool([
-      "-api",
-      "ByteOrder=II",
+      ...orderApi,
       "-TagsFromFile",
       sourcePath,
       ...EXIF_RESYNC_GROUPS,
@@ -116,8 +156,7 @@ export function materializeMetadataJpeg(
     const canvas = path.join(dir, "canvas.jpg");
     fs.writeFileSync(canvas, minimalJpeg());
     runExiftool([
-      "-api",
-      "ByteOrder=II",
+      ...byteOrderApiFromSource(sourcePath),
       "-overwrite_original",
       "-TagsFromFile",
       sourcePath,
@@ -132,20 +171,27 @@ export function materializeMetadataJpeg(
   });
 }
 
+function destFileExt(destFilename: string): string {
+  const ext = path.extname(destFilename).toLowerCase();
+  return ext || ".jpg";
+}
+
 export function tagsFromFileCopyDest(
-  destJpeg: Uint8Array,
+  destBytes: Uint8Array,
   sourcePath: string,
   options: CopyMetadataOptions,
+  destFilename = "dest.jpg",
 ): Uint8Array {
   const exiftool = findExiftool();
-  if (!exiftool) return destJpeg;
+  if (!exiftool) return destBytes;
+  const ext = destFileExt(destFilename);
+  const destIsJpeg = ext === ".jpg" || ext === ".jpeg" || ext === ".jpe";
   return withTempDir("oppo-tff-", (dir) => {
-    const dest = path.join(dir, "dest.jpg");
-    const out = path.join(dir, "out.jpg");
-    fs.writeFileSync(dest, destJpeg);
+    const dest = path.join(dir, `dest${ext}`);
+    const out = path.join(dir, `out${ext}`);
+    fs.writeFileSync(dest, destBytes);
     runExiftool([
-      "-api",
-      "ByteOrder=II",
+      ...byteOrderApiFromSource(sourcePath),
       "-TagsFromFile",
       sourcePath,
       ...buildTagsFromFileArgs(options),
@@ -154,7 +200,7 @@ export function tagsFromFileCopyDest(
       dest,
     ]);
     let result = new Uint8Array(fs.readFileSync(out));
-    if (!options.excludeExif) {
+    if (!options.excludeExif && destIsJpeg) {
       result = syncFullExifFromSource(result, sourcePath);
     }
     return result;
