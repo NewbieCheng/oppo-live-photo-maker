@@ -212,7 +212,14 @@ def test_write_motionphoto_with_reference_metadata(
     )
     assert out.is_file()
     probe = subprocess.run(
-        ["exiftool", "-j", "-EXIF:Make", "-XMP-GCamera:MicroVideo", str(out)],
+        [
+            "exiftool",
+            "-j",
+            "-EXIF:Make",
+            "-XMP-GCamera:MotionPhoto",
+            "-XMP-OpCamera:VideoLength",
+            str(out),
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -221,4 +228,5 @@ def test_write_motionphoto_with_reference_metadata(
 
     tags = json.loads(probe.stdout)[0]
     assert tags.get("Make") == "TestMake"
-    assert tags.get("MicroVideo") == "1"
+    assert tags.get("MotionPhoto") == "1"
+    assert int(tags.get("VideoLength", 0)) == clip.stat().st_size
