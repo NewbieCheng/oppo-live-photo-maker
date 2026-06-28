@@ -167,10 +167,7 @@ def minimal_jpeg() -> bytes:
 
 def _has_mp4_ftyp_near(data: bytes, offset: int) -> bool:
     scan_end = min(offset + 64, len(data) - 4)
-    for i in range(offset, scan_end + 1):
-        if data[i : i + 4] == b"ftyp":
-            return True
-    return False
+    return any(data[i:i + 4] == b"ftyp" for i in range(offset, scan_end + 1))
 
 
 def split_after_last_jpeg_eoi(data: bytes) -> tuple[bytes, bytes]:

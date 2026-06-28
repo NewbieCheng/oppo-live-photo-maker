@@ -265,30 +265,6 @@ def write_oppo_motionphoto(
         fo.write(new_jpeg)
         fo.write(video_mp4.read_bytes())
 
-    # #region agent log
-    from .metadata import _agent_debug
-
-    from .metadata import _read_orientation_numeric
-
-    _agent_debug(
-        "M3",
-        "muxer.py:write_oppo_motionphoto",
-        "motion photo written",
-        {
-            "output": str(output_path),
-            "jpegBytes": len(new_jpeg),
-            "mp4Bytes": video_size,
-            "totalBytes": output_path.stat().st_size,
-            "microVideoOffset": video_size,
-            "presentationTsUs": ts,
-            "hasReference": reference_jpg is not None,
-            "orientation": _read_orientation_numeric(output_path),
-            "hasMpf": b"MPF\x00" in new_jpeg,
-            "hasMotionXmp": b"GCamera:MotionPhoto" in new_jpeg,
-        },
-    )
-    # #endregion
-
     return output_path
 
 

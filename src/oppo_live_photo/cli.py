@@ -182,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             if video_mode == "full":
-                log(f"[2/3] Embedding original video (stream copy) ...")
+                log("[2/3] Embedding original video (stream copy) ...")
                 ffmpeg_utils.prepare_video_for_mux(
                     video, clip, mode="full", start=args.start,
                 )

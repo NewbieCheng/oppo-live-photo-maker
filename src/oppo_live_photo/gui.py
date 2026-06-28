@@ -161,25 +161,6 @@ class ConvertWorker(QtCore.QObject):
                     cover_mode=cover_mode,
                 )
                 clip_bytes = clip.stat().st_size if clip.is_file() else 0
-                # #region agent log
-                metadata._agent_debug(
-                    "M2",
-                    "gui.py:ConvertWorker.run",
-                    "mux complete",
-                    {
-                        "output": str(self.output),
-                        "size": self.output.stat().st_size if self.output.is_file() else 0,
-                        "clipBytes": clip_bytes,
-                        "clipDuration": p.get("duration"),
-                        "videoMode": video_mode,
-                        "coverMode": cover_mode,
-                        "presentationTsUs": p.get("presentation_timestamp_us", 0),
-                        "clipStart": p["start"],
-                        "rotation": rotation,
-                        "hasReference": reference is not None,
-                    },
-                )
-                # #endregion
                 self._result_detail = {
                     "clip_bytes": clip_bytes,
                     "clip_duration": p.get("duration", 0),
@@ -990,9 +971,7 @@ class SingleTab(QtWidgets.QWidget):
     def _can_convert(self) -> bool:
         if not self.video_path or not self.video_info:
             return False
-        if self.radio_cover_ref.isChecked() and not self.reference_path:
-            return False
-        return True
+        return not (self.radio_cover_ref.isChecked() and not self.reference_path)
 
     def _update_export_state(self) -> None:
         ref_ok = bool(self.reference_path)
@@ -1037,21 +1016,6 @@ class SingleTab(QtWidgets.QWidget):
         self.ref_name.setText(path.name)
         self._populate_meta_fields(bundle)
         self._update_ref_chips(path, bundle)
-        # #region agent log
-        from . import metadata as _metadata_mod
-
-        _metadata_mod._agent_debug(
-            "D",
-            "gui.py:load_reference",
-            "GUI loaded reference bundle",
-            {
-                "path": str(path),
-                "exifCount": len(bundle.exif),
-                "iptcCount": len(bundle.iptc),
-                "exifKeys": list(bundle.exif.keys())[:20],
-            },
-        )
-        # #endregion
         pix = QtGui.QPixmap(str(path))
         if not pix.isNull():
             self.ref_thumb.setPixmap(
@@ -1154,32 +1118,7 @@ class SingleTab(QtWidgets.QWidget):
             )
             self._update_export_state()
             self._sync_video_mode_ui()
-            # #region agent log
-            from . import metadata as _metadata_mod
-
-            _metadata_mod._agent_debug(
-                "V1",
-                "gui.py:load_video",
-                "video loaded",
-                {
-                    "path": str(path),
-                    "duration": info.duration,
-                    "codec": info.codec,
-                    "playerDurationMs": self.player.duration(),
-                },
-            )
-            # #endregion
         except Exception as e:
-            # #region agent log
-            from . import metadata as _metadata_mod
-
-            _metadata_mod._agent_debug(
-                "V1",
-                "gui.py:load_video",
-                "load_video failed after probe",
-                {"path": str(path), "error": str(e)},
-            )
-            # #endregion
             QtWidgets.QMessageBox.critical(self, "加载视频预览失败", str(e))
             self._change_video()
 
@@ -1190,16 +1129,6 @@ class SingleTab(QtWidgets.QWidget):
         if self.video_info and self.video_info.codec in ("hevc", "h265"):
             hint += "\n\nHEVC/H.265 在部分 Windows 预览中不可用，但仍可用 ffmpeg 转码导出实况图。"
         self.export_status.setText(f"预览播放失败：{hint}")
-        # #region agent log
-        from . import metadata as _metadata_mod
-
-        _metadata_mod._agent_debug(
-            "V2",
-            "gui.py:_on_player_error",
-            "QMediaPlayer error",
-            {"error": int(error), "message": message, "codec": getattr(self.video_info, "codec", "")},
-        )
-        # #endregion
 
     def _on_media_status(self, status: QMediaPlayer.MediaStatus) -> None:
         if status == QMediaPlayer.InvalidMedia:
@@ -1278,18 +1207,13 @@ class SingleTab(QtWidgets.QWidget):
                 for child in parent.findChildren(QtWidgets.QLabel):
                     if child.objectName() == "fieldLabel":
                         fl = child.text().lower()
-                        if edit.isVisible() and (not q or q in fl or q in key.lower()):
-                            child.setVisible(True)
-                        elif not q:
+                        if edit.isVisible() and (not q or q in fl or q in key.lower()) or not q:
                             child.setVisible(True)
 
     def _populate_meta_fields(self, bundle: metadata.NativeMetadataBundle) -> None:
         for key, edit in self.meta_fields.items():
             is_iptc = edit.property("meta_iptc")
-            if is_iptc:
-                val = bundle.iptc.get(key, "")
-            else:
-                val = bundle.exif.get(key, "")
+            val = bundle.iptc.get(key, "") if is_iptc else bundle.exif.get(key, "")
             edit.blockSignals(True)
             edit.setText(val)
             edit.blockSignals(False)

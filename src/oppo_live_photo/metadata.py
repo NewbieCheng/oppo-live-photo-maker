@@ -15,30 +15,6 @@ from typing import Literal
 
 from . import muxer as _muxer
 
-# #region agent log
-def _agent_debug(hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    import json
-    import time
-
-    payload = {
-        "sessionId": "1a8bb4",
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-    }
-    for base in (Path(__file__).resolve().parents[3], Path(__file__).resolve().parents[2]):
-        log_path = base / "debug-1a8bb4.log"
-        try:
-            with log_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            break
-        except OSError:
-            continue
-
-
-# #endregion
 CoverMode = Literal["video", "reference"]
 
 OPPO_USER_COMMENT = "Oplus_8388608"
@@ -199,48 +175,8 @@ def parse_reference_image(path: str | Path) -> NativeMetadataBundle:
     records = _run_exiftool_json([str(path)])
     record = records[0] if records else {}
 
-    # #region agent log
-    meta_keys = [
-        k for k in record
-        if any(
-            s in k.lower()
-            for s in ("make", "model", "gps", "datetime", "iso", "exif", "ifd", "quicktime", "xmp")
-        )
-    ]
-    _agent_debug(
-        "A",
-        "metadata.py:parse_reference_image",
-        "exiftool record keys sample",
-        {
-            "path": str(path),
-            "suffix": path.suffix.lower(),
-            "totalKeys": len(record),
-            "metaKeys": meta_keys[:40],
-            "exiftool": _muxer._find_exiftool(),
-        },
-    )
-    # #endregion
-
     picked_exif = _pick_tags(record, EDITABLE_EXIF_KEYS)
     picked_iptc = _pick_tags(record, EDITABLE_IPTC_KEYS)
-
-    # #region agent log
-    _agent_debug(
-        "A",
-        "metadata.py:parse_reference_image",
-        "picked tags after EDITABLE_* filter",
-        {
-            "exifCount": len(picked_exif),
-            "iptcCount": len(picked_iptc),
-            "exifKeys": list(picked_exif.keys()),
-            "makeCandidates": {
-                k: record.get(k)
-                for k in record
-                if "make" in k.lower() or "model" in k.lower()
-            },
-        },
-    )
-    # #endregion
 
     bundle = NativeMetadataBundle(
         exif=picked_exif,
@@ -326,10 +262,6 @@ def apply_native_metadata(
     cover_jpg = Path(cover_jpg)
     exiftool = _muxer._find_exiftool()
 
-    # #region agent log
-    orient_before = _read_orientation_numeric(cover_jpg)
-    # #endregion
-
     if reference_jpg is not None:
         copy_img_meta(cover_jpg, reference_jpg, exclude_xmp=True)
 
@@ -350,23 +282,6 @@ def apply_native_metadata(
     cmd.append(f"-EXIF:UserComment={OPPO_USER_COMMENT}")
     cmd.append(str(cover_jpg))
     _muxer._run(cmd)
-
-    # #region agent log
-    _agent_debug(
-        "M1",
-        "metadata.py:apply_native_metadata",
-        "metadata applied to cover",
-        {
-            "cover": str(cover_jpg),
-            "reference": str(reference_jpg) if reference_jpg else None,
-            "overrideExifKeys": list(overrides.exif.keys()) if overrides else [],
-            "orientationBefore": orient_before,
-            "orientationAfter": _read_orientation_numeric(cover_jpg),
-            "preserveOrientation": preserve_orientation,
-            "exiftoolCmdTail": cmd[-4:],
-        },
-    )
-    # #endregion
 
 
 def merge_bundles(

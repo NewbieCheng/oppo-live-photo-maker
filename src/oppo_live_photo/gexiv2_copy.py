@@ -309,11 +309,14 @@ def _validate_coloros_exif(
             issues.append("缺少 GCamera MotionPhoto XMP")
         if op_video_length is None:
             issues.append("缺少 OpCamera VideoLength XMP")
-        if trailing_length is not None and op_video_length is not None:
-            if int(op_video_length) != trailing_length:
-                issues.append(
-                    f"OpCamera VideoLength ({op_video_length}) 与 MP4 尾部 ({trailing_length}) 不一致"
-                )
+        if (
+            trailing_length is not None
+            and op_video_length is not None
+            and int(op_video_length) != trailing_length
+        ):
+            issues.append(
+                f"OpCamera VideoLength ({op_video_length}) 与 MP4 尾部 ({trailing_length}) 不一致"
+            )
         if xmp_mode == "compat":
             if micro_video is None and micro_offset is None:
                 issues.append("compat 模式缺少 GCamera MicroVideo / MicroVideoOffset XMP")
@@ -346,9 +349,7 @@ def _needs_coloros_exif_resync(
         "YCbCrPositioning",
     ) is None:
         return True
-    if require_maker_notes and not _has_maker_notes_in_tags(tag_map):
-        return True
-    return False
+    return bool(require_maker_notes and not _has_maker_notes_in_tags(tag_map))
 
 
 def _tags_from_file_copy(
@@ -551,9 +552,7 @@ def _plan_coloros_exif_supplement(
     src = source_tags or {}
     desired = _infer_copy_exif_byte_order(src, source_bytes)
     current = _jpeg_seg.read_exif_byte_order(jpeg)
-    if current is not None and current != desired:
-        plan["byte_order"] = desired
-    elif current is None and desired:
+    if current is not None and current != desired or current is None and desired:
         plan["byte_order"] = desired
 
     if _tag_value(
